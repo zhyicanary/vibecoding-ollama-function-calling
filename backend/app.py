@@ -7,13 +7,17 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-from tools import get_current_time, get_weather, get_stock_price_cn, send_email as _send_email
+from tools import get_current_time, get_weather, get_stock_price_cn, send_email as _send_email, send_dingtalk
 
 SMTP_CONFIG = {
     'smtp_server': os.environ.get('SMTP_SERVER', 'smtp.qq.com'),
     'smtp_port': int(os.environ.get('SMTP_PORT', 587)),
     'from_email': os.environ.get('FROM_EMAIL', ''),
     'from_password': os.environ.get('SMTP_PASSWORD', '')
+}
+
+DINGTALK_CONFIG = {
+    'webhook_url': os.environ.get('DINGTALK_WEBHOOK_URL', '')
 }
 
 logging.basicConfig(level=logging.INFO)
@@ -107,6 +111,23 @@ TOOLS = [
                 "required": ["to_email", "subject", "content"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_dingtalk",
+            "description": "发送钉钉群消息，可以将消息实时推送到钉钉群。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "要发送的消息内容"
+                    }
+                },
+                "required": ["message"]
+            }
+        }
     }
 ]
 
@@ -162,6 +183,11 @@ def execute_tool(tool_call):
             smtp_server=SMTP_CONFIG['smtp_server'],
             smtp_port=SMTP_CONFIG['smtp_port']
         )
+    elif func_name == 'send_dingtalk':
+        result = send_dingtalk(
+            message=args_dict.get('message', ''),
+            webhook_url=DINGTALK_CONFIG['webhook_url']
+        )
     else:
         result = f"Unknown tool: {func_name}"
     
@@ -176,7 +202,7 @@ def format_response(response_text):
 
 def should_use_tools(message):
     """判断消息是否需要使用工具"""
-    keywords = ['时间', '几点', '日期', '几号', '现在', '今天', 'timezone', '时区', '天气', '晴', '雨', '雪', '温度', '气候', '股票', '股价', '行情', '上证', '深证', '邮件', '发邮件', 'email', '发送邮件']
+    keywords = ['时间', '几点', '日期', '几号', '现在', '今天', 'timezone', '时区', '天气', '晴', '雨', '雪', '温度', '气候', '股票', '股价', '行情', '上证', '深证', '邮件', '发邮件', 'email', '发送邮件', '钉钉', 'dingtalk', '群消息']
     return any(kw in message for kw in keywords)
 
 @app.route('/api/chat', methods=['POST'])
@@ -225,11 +251,17 @@ def chat():
   - `subject` (string, required): 邮件主题
   - `content` (string, required): 邮件正文内容
 
+### 5. send_dingtalk
+- **功能**: 发送钉钉群消息
+- **参数**:
+  - `message` (string, required): 要发送的消息内容
+
 ## 使用规则
 - 用户询问时间 → 使用 get_current_time
 - 用户询问天气 → 使用 get_weather
 - 用户询问股票价格/行情 → 使用 get_stock_price_cn
-- 用户要求发送邮件 → 使用 send_email'''
+- 用户要求发送邮件 → 使用 send_email
+- 用户要求发送钉钉消息/群消息 → 使用 send_dingtalk'''
             }
         ] + conversation_history[-10:]
         
