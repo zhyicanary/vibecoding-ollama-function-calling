@@ -4,8 +4,17 @@ import requests
 import logging
 import json
 import os
-from datetime import datetime
-import pytz
+from dotenv import load_dotenv
+load_dotenv()
+
+from tools import get_current_time, get_weather, get_stock_price_cn, send_email as _send_email
+
+SMTP_CONFIG = {
+    'smtp_server': os.environ.get('SMTP_SERVER', 'smtp.qq.com'),
+    'smtp_port': int(os.environ.get('SMTP_PORT', 587)),
+    'from_email': os.environ.get('FROM_EMAIL', ''),
+    'from_password': os.environ.get('SMTP_PASSWORD', '')
+}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -56,45 +65,51 @@ TOOLS = [
                 "required": ["city"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_stock_price_cn",
+            "description": "获取A股股票价格信息，支持查询A股实时行情。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "6位股票代码，如 '600519' (贵州茅台), '000001' (平安银行)"
+                    }
+                },
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "通过SMTP协议发送邮件，可用于发送邮件给指定收件人。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to_email": {
+                        "type": "string",
+                        "description": "收件人邮箱地址，如 'example@example.com'"
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "邮件主题"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "邮件正文内容"
+                    }
+                },
+                "required": ["to_email", "subject", "content"]
+            }
+        }
     }
 ]
 
-def get_current_time(timezone='Asia/Shanghai', format='full'):
-    """获取当前时间"""
-    try:
-        tz = pytz.timezone(timezone)
-        now = datetime.now(tz)
-        
-        if format == 'date':
-            return now.strftime('%Y年%m月%d日')
-        elif format == 'time':
-            return now.strftime('%H:%M:%S')
-        else:
-            return now.strftime('%Y年%m月%d日 %H:%M:%S %Z')
-    except Exception as e:
-        return f"获取时间失败: {str(e)}"
-
-def get_weather(city):
-    """获取城市天气"""
-    try:
-        url = f"https://wttr.in/{city}?format=j1"
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            current = data.get('current_condition', [{}])[0]
-            
-            weather_desc = current.get('weatherDesc', [{}])[0].get('value', '未知')
-            temp_C = current.get('temp_C', 'N/A')
-            humidity = current.get('humidity', 'N/A')
-            wind_kmh = current.get('windspeedKmh', 'N/A')
-            feelslike = current.get('FeelsLikeC', 'N/A')
-            
-            return f"{city}天气:\n- 温度: {temp_C}°C (体感 {feelslike}°C)\n- 天气: {weather_desc}\n- 湿度: {humidity}%\n- 风速: {wind_kmh} km/h"
-        else:
-            return f"无法获取{city}的天气信息"
-    except Exception as e:
-        return f"获取天气失败: {str(e)}"
 
 def execute_tool(tool_call):
     """执行工具调用"""
@@ -116,6 +131,37 @@ def execute_tool(tool_call):
         )
     elif func_name == 'get_weather':
         result = get_weather(city=args_dict.get('city', ''))
+    elif func_name == 'get_stock_price_cn':
+        ticker = args_dict.get('ticker', '')
+        if not ticker:
+            result = "错误: 请提供股票代码"
+        else:
+            json_result = get_stock_price_cn(ticker=ticker)
+            try:
+                data = json.loads(json_result)
+                if data.get('status') == 'success':
+                    result = (
+                        f"股票: {data['name']} ({data['ticker']})\n"
+                        f"当前价: {data['current_price']}元\n"
+                        f"涨跌幅: {data['change_percent']}%\n"
+                        f"开盘: {data['open']} | 昨收: {data['last_close']}\n"
+                        f"最高: {data['high']} | 最低: {data['low']}"
+                    )
+                else:
+                    result = f"查询失败: {data.get('message')}"
+            except Exception as e:
+                logger.error(f"解析股票数据失败: {e}")
+                result = f"查询失败: {str(e)}"
+    elif func_name == 'send_email':
+        result = _send_email(
+            to_email=args_dict.get('to_email', ''),
+            subject=args_dict.get('subject', ''),
+            content=args_dict.get('content', ''),
+            from_email=SMTP_CONFIG['from_email'],
+            from_password=SMTP_CONFIG['from_password'],
+            smtp_server=SMTP_CONFIG['smtp_server'],
+            smtp_port=SMTP_CONFIG['smtp_port']
+        )
     else:
         result = f"Unknown tool: {func_name}"
     
@@ -130,7 +176,7 @@ def format_response(response_text):
 
 def should_use_tools(message):
     """判断消息是否需要使用工具"""
-    keywords = ['时间', '几点', '日期', '几号', '现在', '今天', 'timezone', '时区', '天气', '晴', '雨', '雪', '温度', '气候']
+    keywords = ['时间', '几点', '日期', '几号', '现在', '今天', 'timezone', '时区', '天气', '晴', '雨', '雪', '温度', '气候', '股票', '股价', '行情', '上证', '深证', '邮件', '发邮件', 'email', '发送邮件']
     return any(kw in message for kw in keywords)
 
 @app.route('/api/chat', methods=['POST'])
@@ -152,7 +198,38 @@ def chat():
         messages = [
             {
                 'role': 'system',
-                'content': '你是一个友好的AI数字人助手。当用户询问时间相关问题时，使用get_current_time工具来获取准确的时间信息。当用户询问天气相关问题时，使用get_weather工具来获取准确的天气信息。'
+                'content': '''你是一个友好的AI数字人助手。请根据用户问题选择合适的工具进行回答。
+
+## 可用工具
+
+### 1. get_current_time
+- **功能**: 获取当前时间信息
+- **参数**:
+  - `timezone` (string, optional): 时区名称，如 'Asia/Shanghai', 'America/New_York', 'UTC'，默认 'Asia/Shanghai'
+  - `format` (string, optional): 返回格式，可选 'full'(完整), 'date'(仅日期), 'time'(仅时间)，默认 'full'
+
+### 2. get_weather
+- **功能**: 获取指定城市的天气信息
+- **参数**:
+  - `city` (string, required): 城市名称，如 '上海', '北京', 'Tokyo', 'New York'
+
+### 3. get_stock_price_cn
+- **功能**: 获取A股股票价格信息
+- **参数**:
+  - `ticker` (string, required): 6位股票代码，如 '600519' (贵州茅台), '000001' (平安银行)
+
+### 4. send_email
+- **功能**: 通过SMTP协议发送邮件
+- **参数**:
+  - `to_email` (string, required): 收件人邮箱地址
+  - `subject` (string, required): 邮件主题
+  - `content` (string, required): 邮件正文内容
+
+## 使用规则
+- 用户询问时间 → 使用 get_current_time
+- 用户询问天气 → 使用 get_weather
+- 用户询问股票价格/行情 → 使用 get_stock_price_cn
+- 用户要求发送邮件 → 使用 send_email'''
             }
         ] + conversation_history[-10:]
         
