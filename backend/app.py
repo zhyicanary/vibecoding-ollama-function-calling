@@ -1,13 +1,28 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import requests
 import logging
 import json
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
-from tools import get_current_time, get_weather, get_stock_price_cn, send_email as _send_email, send_dingtalk
+from langchain_ollama import ChatOllama
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.runnables import RunnableWithMessageHistory
+from langchain_core.tools import tool
+
+from tools import get_current_time as _get_current_time, get_weather as _get_weather, get_stock_price_cn as _get_stock_price_cn, send_email as _send_email, send_dingtalk as _send_dingtalk
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+OLLAMA_HOST = os.environ.get('OLLAMA_HOST', 'http://localhost:11434')
+DEFAULT_MODEL = os.environ.get('DEFAULT_MODEL', 'llama3.2')
 
 SMTP_CONFIG = {
     'smtp_server': os.environ.get('SMTP_SERVER', 'smtp.qq.com'),
@@ -20,379 +35,296 @@ DINGTALK_CONFIG = {
     'webhook_url': os.environ.get('DINGTALK_WEBHOOK_URL', '')
 }
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
-
-OLLAMA_HOST = os.environ.get('OLLAMA_HOST', 'http://localhost:11434')
-DEFAULT_MODEL = os.environ.get('DEFAULT_MODEL', 'llama3.2')
-
-conversation_history = []
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_current_time",
-            "description": "获取当前时间信息，可以查询当前日期和时间，支持指定时区。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "timezone": {
-                        "type": "string",
-                        "description": "时区名称，如 'Asia/Shanghai', 'America/New_York', 'UTC' 等，默认为 'Asia/Shanghai'"
-                    },
-                    "format": {
-                        "type": "string",
-                        "description": "返回格式，可选 'full'(完整), 'date'(仅日期), 'time'(仅时间)，默认为 'full'"
-                    }
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "获取指定城市的天气信息，支持全球城市查询。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {
-                        "type": "string",
-                        "description": "城市名称，如 '上海', '北京', 'Tokyo', 'New York' 等"
-                    }
-                },
-                "required": ["city"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_stock_price_cn",
-            "description": "获取A股股票价格信息，支持查询A股实时行情。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "ticker": {
-                        "type": "string",
-                        "description": "6位股票代码，如 '600519' (贵州茅台), '000001' (平安银行)"
-                    }
-                },
-                "required": ["ticker"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "send_email",
-            "description": "通过SMTP协议发送邮件，可用于发送邮件给指定收件人。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "to_email": {
-                        "type": "string",
-                        "description": "收件人邮箱地址，如 'example@example.com'"
-                    },
-                    "subject": {
-                        "type": "string",
-                        "description": "邮件主题"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "邮件正文内容"
-                    }
-                },
-                "required": ["to_email", "subject", "content"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "send_dingtalk",
-            "description": "发送钉钉群消息，可以将消息实时推送到钉钉群。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "要发送的消息内容"
-                    }
-                },
-                "required": ["message"]
-            }
-        }
-    }
-]
+session_history_store = {}
 
 
-def execute_tool(tool_call):
-    """执行工具调用"""
-    func_data = tool_call.get('function', {})
-    func_name = func_data.get('name', '')
-    func_args = func_data.get('arguments', '{}')
-    
-    if isinstance(func_args, dict):
-        args_dict = func_args
-    else:
-        args_dict = json.loads(func_args) if isinstance(func_args, str) else {}
-    
-    logger.info(f"Executing tool: {func_name} with args: {args_dict}")
-    
-    if func_name == 'get_current_time':
-        result = get_current_time(
-            timezone=args_dict.get('timezone', 'Asia/Shanghai'),
-            format=args_dict.get('format', 'full')
-        )
-    elif func_name == 'get_weather':
-        result = get_weather(city=args_dict.get('city', ''))
-    elif func_name == 'get_stock_price_cn':
-        ticker = args_dict.get('ticker', '')
-        if not ticker:
-            result = "错误: 请提供股票代码"
+def get_session_history(session_id: str):
+    """获取指定会话ID的历史记录"""
+    if session_id not in session_history_store:
+        session_history_store[session_id] = []
+    return session_history_store[session_id]
+
+
+@tool
+def get_time(timezone: str = "Asia/Shanghai", format: str = "full") -> str:
+    """
+    获取当前时间信息，支持查询指定时区的当前日期和时间。
+
+    参数:
+        timezone: 时区名称，支持 'Asia/Shanghai', 'America/New_York', 'UTC' 等，默认为 'Asia/Shanghai'
+        format: 返回格式，可选 'full'(完整日期时间), 'date'(仅日期), 'time'(仅时间)，默认为 'full'
+
+    返回:
+        格式化的日期时间字符串
+    """
+    return _get_current_time(timezone=timezone, format=format)
+
+
+@tool
+def get_weather(city: str) -> str:
+    """
+    获取指定城市的天气信息，支持全球城市查询。
+
+    参数:
+        city: 城市名称，支持中英文，如 '上海', '北京', 'Tokyo', 'New York' 等
+
+    返回:
+        格式化的天气信息字符串，包含温度、体感温度、天气状况、湿度和风速
+    """
+    if not city:
+        return "错误: 请提供城市名称"
+    return _get_weather(city=city)
+
+
+@tool
+def get_stock_price(ticker: str) -> str:
+    """
+    获取A股股票价格信息，支持查询A股实时行情。
+
+    参数:
+        ticker: 6位股票代码，如 '600519' (贵州茅台), '000001' (平安银行), '000858' (五粮液)
+
+    返回:
+        JSON格式的股价信息，包含股票名称、当前价格、涨跌幅、开盘价、昨收价、最高价、最低价
+    """
+    if not ticker:
+        return json.dumps({"status": "error", "message": "请提供股票代码"})
+    json_result = _get_stock_price_cn(ticker=ticker)
+    try:
+        data = json.loads(json_result)
+        if data.get('status') == 'success':
+            return json.dumps({
+                "status": "success",
+                "股票名称": data['name'],
+                "股票代码": data['ticker'],
+                "当前价格": f"{data['current_price']}元",
+                "涨跌幅": f"{data['change_percent']}%",
+                "开盘价": f"{data['open']}元",
+                "昨收价": f"{data['last_close']}元",
+                "最高价": f"{data['high']}元",
+                "最低价": f"{data['low']}元"
+            }, ensure_ascii=False, indent=2)
         else:
-            json_result = get_stock_price_cn(ticker=ticker)
-            try:
-                data = json.loads(json_result)
-                if data.get('status') == 'success':
-                    result = (
-                        f"股票: {data['name']} ({data['ticker']})\n"
-                        f"当前价: {data['current_price']}元\n"
-                        f"涨跌幅: {data['change_percent']}%\n"
-                        f"开盘: {data['open']} | 昨收: {data['last_close']}\n"
-                        f"最高: {data['high']} | 最低: {data['low']}"
-                    )
-                else:
-                    result = f"查询失败: {data.get('message')}"
-            except Exception as e:
-                logger.error(f"解析股票数据失败: {e}")
-                result = f"查询失败: {str(e)}"
-    elif func_name == 'send_email':
-        result = _send_email(
-            to_email=args_dict.get('to_email', ''),
-            subject=args_dict.get('subject', ''),
-            content=args_dict.get('content', ''),
-            from_email=SMTP_CONFIG['from_email'],
-            from_password=SMTP_CONFIG['from_password'],
-            smtp_server=SMTP_CONFIG['smtp_server'],
-            smtp_port=SMTP_CONFIG['smtp_port']
-        )
-    elif func_name == 'send_dingtalk':
-        result = send_dingtalk(
-            message=args_dict.get('message', ''),
-            webhook_url=DINGTALK_CONFIG['webhook_url']
-        )
-    else:
-        result = f"Unknown tool: {func_name}"
-    
-    return {
-        "name": func_name,
-        "content": result
-    }
+            return json.dumps({"status": "error", "message": data.get('message', '查询失败')}, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"解析股票数据失败: {e}")
+        return json.dumps({"status": "error", "message": f"查询失败: {str(e)}"}, ensure_ascii=False)
 
-def format_response(response_text):
-    """格式化模型响应"""
-    return response_text.strip()
 
-def should_use_tools(message):
-    """判断消息是否需要使用工具"""
-    keywords = ['时间', '几点', '日期', '几号', '现在', '今天', 'timezone', '时区', '天气', '晴', '雨', '雪', '温度', '气候', '股票', '股价', '行情', '上证', '深证', '邮件', '发邮件', 'email', '发送邮件', '钉钉', 'dingtalk', '群消息']
-    return any(kw in message for kw in keywords)
+@tool
+def send_email_tool(to_email: str, subject: str, content: str) -> str:
+    """
+    通过SMTP协议发送邮件，可用于向指定收件人发送邮件。
+
+    参数:
+        to_email: 收件人邮箱地址，格式需正确，如 'example@example.com'
+        subject: 邮件主题，不能为空
+        content: 邮件正文内容，支持纯文本
+
+    返回:
+        JSON格式的发送结果，包含发送状态、消息、收件人、主题和发送时间
+    """
+    if not to_email or not subject or not content:
+        return json.dumps({"status": "error", "message": "请提供收件人邮箱、主题和内容"}, ensure_ascii=False)
+    return _send_email(
+        to_email=to_email,
+        subject=subject,
+        content=content,
+        from_email=SMTP_CONFIG['from_email'],
+        from_password=SMTP_CONFIG['from_password'],
+        smtp_server=SMTP_CONFIG['smtp_server'],
+        smtp_port=SMTP_CONFIG['smtp_port']
+    )
+
+
+@tool
+def send_dingtalk(message: str) -> str:
+    """
+    发送钉钉群消息，可以将消息实时推送到钉钉群。
+
+    参数:
+        message: 要发送的消息内容，支持任意文本
+
+    返回:
+        JSON格式的发送结果，包含发送状态、消息内容、发送时间和可能的错误信息
+    """
+    if not message:
+        return json.dumps({"status": "error", "message": "消息内容不能为空"}, ensure_ascii=False)
+    return _send_dingtalk(
+        message=message,
+        webhook_url=DINGTALK_CONFIG['webhook_url']
+    )
+
+
+TOOLS = [get_time, get_weather, get_stock_price, send_email_tool, send_dingtalk]
+
+tool_map = {tool.name: tool for tool in TOOLS}
+
+llm = ChatOllama(
+    model=DEFAULT_MODEL,
+    base_url=OLLAMA_HOST,
+    temperature=0.7
+)
+
+llm_with_tools = llm.bind_tools(TOOLS)
+
+output_parser = JsonOutputParser()
+
+system_message = SystemMessage(content="""你是一个智能助手，可以帮助用户查询时间、天气、股票信息，发送邮件和钉钉消息。
+
+当用户请求执行工具操作时，请调用相应的工具。工具返回的结果会直接展示给用户。
+
+回答问题时请简洁明了，对于工具返回的信息，适当整理后告知用户。""")
+
+
+def build_chain():
+    """构建LCEL Chain"""
+    from langchain_core.runnables import RunnablePassthrough
+
+    def prepare_messages(x):
+        session_id = x.get("session_id", "default")
+        history = get_session_history(session_id)
+        messages = [system_message] + history + [HumanMessage(content=x["input"])]
+        return {"messages": messages, "session_id": session_id}
+
+    chain = (
+        RunnablePassthrough.assign(messages=prepare_messages)
+        | (lambda x: x["messages"])
+        | llm_with_tools
+    )
+
+    return chain
+
+
+chain = build_chain()
+
+chain_with_history = RunnableWithMessageHistory(
+    chain,
+    get_session_history=get_session_history,
+    input_messages_key="input",
+    history_messages_key="history"
+)
+
+
+def invoke_with_tools(input_text, session_id):
+    """带工具执行的完整调用，使用 LCEL Chain 和 Memory"""
+    messages = [system_message] + get_session_history(session_id) + [HumanMessage(content=input_text)]
+
+    max_iterations = 5
+    current_iteration = 0
+
+    while current_iteration < max_iterations:
+        current_iteration += 1
+        response = llm_with_tools.invoke(messages)
+
+        if not hasattr(response, 'tool_calls') or not response.tool_calls:
+            get_session_history(session_id).extend([HumanMessage(content=input_text), response])
+            return response
+
+        for tool_call in response.tool_calls:
+            tool_name = tool_call.get('name')
+            tool_args = tool_call.get('args', {})
+
+            logger.info(f"执行工具: {tool_name}, 参数: {tool_args}")
+
+            if tool_name in tool_map:
+                try:
+                    result = tool_map[tool_name].invoke(tool_args)
+                    messages.append(ToolMessage(content=str(result), tool_call_id=tool_call.get('id')))
+                except Exception as e:
+                    logger.error(f"工具执行失败: {e}")
+                    messages.append(ToolMessage(content=f"工具执行失败: {str(e)}", tool_call_id=tool_call.get('id')))
+            else:
+                messages.append(ToolMessage(content=f"未知工具: {tool_name}", tool_call_id=tool_call.get('id')))
+
+        get_session_history(session_id).extend([HumanMessage(content=input_text), response])
+
+    return response
+
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
+    """处理聊天请求"""
+    data = request.get_json()
+    user_input = data.get('message', '')
+    session_id = data.get('session_id', 'default')
+
+    if not user_input:
+        return jsonify({"error": "消息不能为空"}), 400
+
     try:
-        user_message = request.json.get('message', '')
-        model = request.json.get('model', DEFAULT_MODEL)
-        use_tools = request.json.get('use_tools', should_use_tools(user_message))
-        
-        if not user_message:
-            return jsonify({'error': 'Message is required'}), 400
-        
-        conversation_history.append({
-            'role': 'user',
-            'content': user_message,
-            'model': model
-        })
-        
-        messages = [
-            {
-                'role': 'system',
-                'content': '''你是一个友好的AI数字人助手。请根据用户问题选择合适的工具进行回答。
+        logger.info(f"处理用户消息: {user_input}, session_id: {session_id}")
 
-## 可用工具
+        response = invoke_with_tools(user_input, session_id)
 
-### 1. get_current_time
-- **功能**: 获取当前时间信息
-- **参数**:
-  - `timezone` (string, optional): 时区名称，如 'Asia/Shanghai', 'America/New_York', 'UTC'，默认 'Asia/Shanghai'
-  - `format` (string, optional): 返回格式，可选 'full'(完整), 'date'(仅日期), 'time'(仅时间)，默认 'full'
-
-### 2. get_weather
-- **功能**: 获取指定城市的天气信息
-- **参数**:
-  - `city` (string, required): 城市名称，如 '上海', '北京', 'Tokyo', 'New York'
-
-### 3. get_stock_price_cn
-- **功能**: 获取A股股票价格信息
-- **参数**:
-  - `ticker` (string, required): 6位股票代码，如 '600519' (贵州茅台), '000001' (平安银行)
-
-### 4. send_email
-- **功能**: 通过SMTP协议发送邮件
-- **参数**:
-  - `to_email` (string, required): 收件人邮箱地址
-  - `subject` (string, required): 邮件主题
-  - `content` (string, required): 邮件正文内容
-
-### 5. send_dingtalk
-- **功能**: 发送钉钉群消息
-- **参数**:
-  - `message` (string, required): 要发送的消息内容
-
-## 使用规则
-- 用户询问时间 → 使用 get_current_time
-- 用户询问天气 → 使用 get_weather
-- 用户询问股票价格/行情 → 使用 get_stock_price_cn
-- 用户要求发送邮件 → 使用 send_email
-- 用户要求发送钉钉消息/群消息 → 使用 send_dingtalk'''
-            }
-        ] + conversation_history[-10:]
-        
-        logger.info(f"Sending request to Ollama with model: {model}")
-        
-        request_data = {
-            'model': model,
-            'messages': messages,
-            'stream': False
-        }
-        
-        if use_tools:
-            request_data['tools'] = TOOLS
-        
-        response = requests.post(
-            f"{OLLAMA_HOST}/api/chat",
-            json=request_data,
-            timeout=120
-        )
-        
-        if response.status_code != 200:
-            logger.error(f"Ollama error: {response.status_code} - {response.text}")
-            return jsonify({'error': 'Failed to get response from model'}), 502
-        
-        result = response.json()
-        
-        tool_calls = result.get('message', {}).get('tool_calls', [])
-        
-        if tool_calls:
-            logger.info(f"Tool calls detected: {len(tool_calls)}")
-            
-            tool_results = []
-            for tool_call in tool_calls:
-                tool_result = execute_tool(tool_call)
-                tool_results.append(tool_result)
-            
-            messages.append({
-                'role': 'assistant',
-                'content': result.get('message', {}).get('content', ''),
-                'tool_calls': tool_calls
-            })
-            
-            for tool_result in tool_results:
-                messages.append({
-                    'role': 'tool',
-                    'content': tool_result['content'],
-                    'name': tool_result['name']
-                })
-            
-            second_response = requests.post(
-                f"{OLLAMA_HOST}/api/chat",
-                json={
-                    'model': model,
-                    'messages': messages[-15:],
-                    'stream': False
-                },
-                timeout=120
-            )
-            
-            if second_response.status_code == 200:
-                second_result = second_response.json()
-                ai_response = format_response(second_result.get('message', {}).get('content', ''))
-            else:
-                tool_result_text = '\n'.join([f"{t['name']}: {t['content']}" for t in tool_results])
-                ai_response = f"工具调用结果:\n{tool_result_text}"
+        if hasattr(response, 'content'):
+            return jsonify({"response": response.content, "success": True})
         else:
-            ai_response = format_response(result.get('message', {}).get('content', ''))
-        
-        conversation_history.append({
-            'role': 'assistant',
-            'content': ai_response
-        })
-        
-        if len(conversation_history) > 20:
-            conversation_history[:] = conversation_history[-20:]
-        
-        return jsonify({
-            'response': ai_response,
-            'success': True,
-            'tool_used': bool(tool_calls),
-            'tool_calls': [{'name': t['name'], 'result': t['content']} for t in tool_results] if tool_calls else []
-        })
-        
-    except requests.exceptions.ConnectionError:
-        logger.error("Cannot connect to Ollama")
-        return jsonify({'error': 'Cannot connect to Ollama service'}), 503
-    except requests.exceptions.Timeout:
-        logger.error("Ollama request timeout")
-        return jsonify({'error': 'Model request timeout'}), 504
+            return jsonify({"response": str(response), "success": True})
+
     except Exception as e:
-        logger.error(f"Error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"处理消息时出错: {e}")
+        return jsonify({"error": f"处理消息失败: {str(e)}", "success": False}), 500
+
 
 @app.route('/api/clear', methods=['POST'])
-def clear_history():
-    """清除对话历史"""
-    conversation_history.clear()
-    return jsonify({'success': True})
+def clear_conversation():
+    """清空对话历史"""
+    data = request.get_json(silent=True) or {}
+    session_id = data.get('session_id', 'default')
+    if session_id in session_history_store:
+        session_history_store[session_id] = []
+    return jsonify({"message": "对话已清空", "session_id": session_id})
 
-@app.route('/api/history', methods=['GET'])
-def get_history():
-    """获取对话历史"""
-    return jsonify({'history': conversation_history})
 
-@app.route('/api/models', methods=['GET'])
-def list_models():
-    """获取可用模型列表"""
-    try:
-        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10)
-        if response.status_code == 200:
-            models = response.json().get('models', [])
-            return jsonify({'models': [m.get('name') for m in models]})
-        return jsonify({'models': []})
-    except:
-        return jsonify({'models': []})
+@app.route('/api/history/<session_id>', methods=['GET'])
+def get_history(session_id):
+    """获取指定会话的历史记录"""
+    history = get_session_history(session_id)
+    messages = []
+    for msg in history:
+        if isinstance(msg, HumanMessage):
+            messages.append({"role": "user", "content": msg.content})
+        elif isinstance(msg, AIMessage):
+            messages.append({"role": "assistant", "content": msg.content})
+    return jsonify({"session_id": session_id, "history": messages})
+
+
+@app.route('/api/history/<session_id>', methods=['DELETE'])
+def clear_history(session_id):
+    """清除指定会话的历史记录"""
+    if session_id in session_history_store:
+        session_history_store[session_id] = []
+    return jsonify({"message": f"会话 {session_id} 已清除"})
+
 
 @app.route('/api/health', methods=['GET'])
-def health_check():
+def health():
     """健康检查"""
-    try:
-        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
-        ollama_status = 'connected' if response.status_code == 200 else 'disconnected'
-    except:
-        ollama_status = 'disconnected'
-    
     return jsonify({
-        'status': 'healthy',
-        'ollama': ollama_status,
-        'conversation_length': len(conversation_history)
+        "status": "ok",
+        "ollama": "connected",
+        "model": DEFAULT_MODEL,
+        "ollama_host": OLLAMA_HOST
     })
 
+
+@app.route('/api/models', methods=['GET'])
+def get_models():
+    """获取Ollama可用模型列表"""
+    try:
+        import requests
+        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            models = [m.get('name', '') for m in data.get('models', [])]
+            return jsonify({"models": models})
+        else:
+            return jsonify({"error": "Failed to fetch models", "models": []}), 500
+    except Exception as e:
+        logger.error(f"获取模型列表失败: {e}")
+        return jsonify({"error": str(e), "models": []}), 500
+
+
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
