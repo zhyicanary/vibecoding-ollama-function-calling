@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import ReactMarkdown from 'react-markdown'
 
 const API_BASE = '/api'
 
@@ -418,7 +419,7 @@ function App() {
                   {msg.role === 'user' ? 'U' : msg.role === 'tool' ? '🔧' : 'AI'}
                 </div>
                 <div className="message-content">
-                  {msg.content}
+                  <ReactMarkdown>{msg.content}</ReactMarkdown>
                 </div>
               </div>
             ))

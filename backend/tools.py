@@ -149,4 +149,61 @@ def get_stock_price_cn(ticker):
             "status": "error",
             "message": f"获取失败：{str(e)}"
         }, ensure_ascii=False)
+
+
+def send_dingtalk(message, webhook_url=None):
+    """
+    发送钉钉消息到群机器人
+    :param message: 消息内容
+    :param webhook_url: 钉钉机器人webhook地址（从钉钉群设置->群机器人->webhook获取）
+    :return: JSON格式的发送结果
+    """
+    import os
+    
+    if webhook_url is None:
+        webhook_url = os.environ.get('DINGTALK_WEBHOOK_URL', '')
+    
+    send_time = datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')
+    
+    try:
+        payload = {
+            "msgtype": "text",
+            "text": {
+                "content": f"{message}\n发送时间: {send_time}"
+            }
+        }
+        
+        response = requests.post(webhook_url, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            result_data = response.json()
+            if result_data.get('errcode') == 0:
+                return json.dumps({
+                    "status": "success",
+                    "message": "钉钉消息发送成功",
+                    "content": message,
+                    "send_time": send_time
+                }, ensure_ascii=False, indent=2)
+            else:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"发送失败: {result_data.get('errmsg', '未知错误')}",
+                    "content": message,
+                    "send_time": send_time
+                }, ensure_ascii=False, indent=2)
+        else:
+            return json.dumps({
+                "status": "error",
+                "message": f"HTTP错误: {response.status_code}",
+                "content": message,
+                "send_time": send_time
+            }, ensure_ascii=False, indent=2)
+            
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"发送失败: {str(e)}",
+            "content": message,
+            "send_time": send_time
+        }, ensure_ascii=False, indent=2)
         
