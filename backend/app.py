@@ -1,10 +1,13 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import logging
 import json
 import os
+from typing import Optional, List
+from pydantic import BaseModel
 from datetime import datetime
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from langchain_ollama import ChatOllama
@@ -13,14 +16,38 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.runnables import RunnableWithMessageHistory
 from langchain_core.tools import tool
 
-from tools import get_current_time as _get_current_time, get_weather as _get_weather, get_stock_price_cn as _get_stock_price_cn, send_email as _send_email, send_dingtalk as _send_dingtalk
+from tools import (
+    get_current_time as _get_current_time,
+    get_weather as _get_weather,
+    get_stock_price_cn as _get_stock_price_cn,
+    send_email as _send_email,
+    send_dingtalk as _send_dingtalk
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+# ========================================
+# FastAPI 应用初始化
+# ========================================
+app = FastAPI(
+    title="AI数字人对话应用",
+    description="基于Ollama本地大模型的AI数字人对话应用",
+    version="2.0.0"
+)
 
+# 添加CORS中间件
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ========================================
+# 配置参数
+# ========================================
 OLLAMA_HOST = os.environ.get('OLLAMA_HOST', 'http://localhost:11434')
 DEFAULT_MODEL = os.environ.get('DEFAULT_MODEL', 'llama3.2')
 
@@ -37,7 +64,69 @@ DINGTALK_CONFIG = {
 
 session_history_store = {}
 
+# ========================================
+# Pydantic 模型定义
+# ========================================
+class ChatRequest(BaseModel):
+    """聊天请求模型"""
+    message: str
+    session_id: str = "default"
 
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "message": "北京今天天气怎么样？",
+                "session_id": "user123"
+            }
+        }
+
+
+class ChatResponse(BaseModel):
+    """聊天响应模型"""
+    response: str
+    success: bool
+    error: Optional[str] = None
+
+
+class HistoryMessage(BaseModel):
+    """历史消息模型"""
+    role: str  # "user" 或 "assistant"
+    content: str
+
+
+class HistoryResponse(BaseModel):
+    """历史记录响应模型"""
+    session_id: str
+    history: List[HistoryMessage]
+
+
+class HealthResponse(BaseModel):
+    """健康检查响应模型"""
+    status: str
+    ollama: str
+    model: str
+    ollama_host: str
+
+
+class ModelsResponse(BaseModel):
+    """模型列表响应模型"""
+    models: List[str]
+
+
+class ClearRequest(BaseModel):
+    """清空请求模型"""
+    session_id: str = "default"
+
+
+class ClearResponse(BaseModel):
+    """清空响应模型"""
+    message: str
+    session_id: str
+
+
+# ========================================
+# 会话管理函数
+# ========================================
 def get_session_history(session_id: str):
     """获取指定会话ID的历史记录"""
     if session_id not in session_history_store:
@@ -45,6 +134,9 @@ def get_session_history(session_id: str):
     return session_history_store[session_id]
 
 
+# ========================================
+# LangChain 工具定义
+# ========================================
 @tool
 def get_time(timezone: str = "Asia/Shanghai", format: str = "full") -> str:
     """
@@ -156,8 +248,10 @@ def send_dingtalk(message: str) -> str:
     )
 
 
+# ========================================
+# LangChain 配置
+# ========================================
 TOOLS = [get_time, get_weather, get_stock_price, send_email_tool, send_dingtalk]
-
 tool_map = {tool.name: tool for tool in TOOLS}
 
 llm = ChatOllama(
@@ -167,7 +261,6 @@ llm = ChatOllama(
 )
 
 llm_with_tools = llm.bind_tools(TOOLS)
-
 output_parser = JsonOutputParser()
 
 system_message = SystemMessage(content="""你是一个智能助手，可以帮助用户查询时间、天气、股票信息，发送邮件和钉钉消息。
@@ -206,7 +299,7 @@ chain_with_history = RunnableWithMessageHistory(
 )
 
 
-def invoke_with_tools(input_text, session_id):
+def invoke_with_tools(input_text: str, session_id: str):
     """带工具执行的完整调用，使用 LCEL Chain 和 Memory"""
     messages = [system_message] + get_session_history(session_id) + [HumanMessage(content=input_text)]
 
@@ -242,89 +335,178 @@ def invoke_with_tools(input_text, session_id):
     return response
 
 
-@app.route('/api/chat', methods=['POST'])
-def chat():
-    """处理聊天请求"""
-    data = request.get_json()
-    user_input = data.get('message', '')
-    session_id = data.get('session_id', 'default')
+# ========================================
+# API 端点
+# ========================================
 
-    if not user_input:
-        return jsonify({"error": "消息不能为空"}), 400
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """
+    处理聊天请求
+    
+    Args:
+        request: 聊天请求对象
+        
+    Returns:
+        聊天响应对象
+        
+    Raises:
+        HTTPException: 当消息为空或处理失败时
+    """
+    if not request.message or not request.message.strip():
+        raise HTTPException(status_code=400, detail="消息不能为空")
 
     try:
-        logger.info(f"处理用户消息: {user_input}, session_id: {session_id}")
+        logger.info(f"处理用户消息: {request.message}, session_id: {request.session_id}")
 
-        response = invoke_with_tools(user_input, session_id)
+        response = invoke_with_tools(request.message, request.session_id)
 
         if hasattr(response, 'content'):
-            return jsonify({"response": response.content, "success": True})
+            return ChatResponse(response=response.content, success=True)
         else:
-            return jsonify({"response": str(response), "success": True})
+            return ChatResponse(response=str(response), success=True)
 
     except Exception as e:
         logger.error(f"处理消息时出错: {e}")
-        return jsonify({"error": f"处理消息失败: {str(e)}", "success": False}), 500
+        raise HTTPException(status_code=500, detail=f"处理消息失败: {str(e)}")
 
 
-@app.route('/api/clear', methods=['POST'])
-def clear_conversation():
-    """清空对话历史"""
-    data = request.get_json(silent=True) or {}
-    session_id = data.get('session_id', 'default')
+@app.post("/api/clear", response_model=ClearResponse)
+async def clear_conversation(request: ClearRequest = None):
+    """
+    清空对话历史
+    
+    Args:
+        request: 清空请求对象，包含session_id
+        
+    Returns:
+        清空确认响应
+    """
+    session_id = request.session_id if request else "default"
     if session_id in session_history_store:
         session_history_store[session_id] = []
-    return jsonify({"message": "对话已清空", "session_id": session_id})
+    return ClearResponse(message="对话已清空", session_id=session_id)
 
 
-@app.route('/api/history/<session_id>', methods=['GET'])
-def get_history(session_id):
-    """获取指定会话的历史记录"""
+@app.get("/api/history/{session_id}", response_model=HistoryResponse)
+async def get_history(session_id: str):
+    """
+    获取指定会话的历史记录
+    
+    Args:
+        session_id: 会话ID
+        
+    Returns:
+        历史记录响应
+    """
     history = get_session_history(session_id)
     messages = []
     for msg in history:
         if isinstance(msg, HumanMessage):
-            messages.append({"role": "user", "content": msg.content})
+            messages.append(HistoryMessage(role="user", content=msg.content))
         elif isinstance(msg, AIMessage):
-            messages.append({"role": "assistant", "content": msg.content})
-    return jsonify({"session_id": session_id, "history": messages})
+            messages.append(HistoryMessage(role="assistant", content=msg.content))
+    return HistoryResponse(session_id=session_id, history=messages)
 
 
-@app.route('/api/history/<session_id>', methods=['DELETE'])
-def clear_history(session_id):
-    """清除指定会话的历史记录"""
+@app.delete("/api/history/{session_id}", response_model=ClearResponse)
+async def clear_history(session_id: str):
+    """
+    清除指定会话的历史记录
+    
+    Args:
+        session_id: 会话ID
+        
+    Returns:
+        清除确认响应
+    """
     if session_id in session_history_store:
         session_history_store[session_id] = []
-    return jsonify({"message": f"会话 {session_id} 已清除"})
+    return ClearResponse(message=f"会话 {session_id} 已清除", session_id=session_id)
 
 
-@app.route('/api/health', methods=['GET'])
-def health():
-    """健康检查"""
-    return jsonify({
-        "status": "ok",
-        "ollama": "connected",
-        "model": DEFAULT_MODEL,
-        "ollama_host": OLLAMA_HOST
-    })
+@app.get("/api/health", response_model=HealthResponse)
+async def health():
+    """
+    健康检查端点
+    
+    Returns:
+        系统健康状态信息
+    """
+    return HealthResponse(
+        status="ok",
+        ollama="connected",
+        model=DEFAULT_MODEL,
+        ollama_host=OLLAMA_HOST
+    )
 
 
-@app.route('/api/models', methods=['GET'])
-def get_models():
-    """获取Ollama可用模型列表"""
+@app.get("/api/models", response_model=ModelsResponse)
+async def get_models():
+    """
+    获取Ollama可用模型列表
+    
+    Returns:
+        可用模型列表
+        
+    Raises:
+        HTTPException: 当获取模型失败时
+    """
     try:
         import requests
         response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
         if response.status_code == 200:
             data = response.json()
             models = [m.get('name', '') for m in data.get('models', [])]
-            return jsonify({"models": models})
+            return ModelsResponse(models=models)
         else:
-            return jsonify({"error": "Failed to fetch models", "models": []}), 500
+            raise HTTPException(status_code=500, detail="获取模型列表失败")
     except Exception as e:
         logger.error(f"获取模型列表失败: {e}")
-        return jsonify({"error": str(e), "models": []}), 500
+        raise HTTPException(status_code=500, detail=f"获取模型列表失败: {str(e)}")
 
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+@app.get("/")
+async def root():
+    """
+    根路径 - 返回API信息
+    """
+    return {
+        "name": "AI数字人对话应用",
+        "version": "2.0.0",
+        "description": "基于Ollama本地大模型的AI数字人对话应用",
+        "docs": "/docs",
+        "redoc": "/redoc"
+    }
+
+
+# ========================================
+# 应用启动和关闭事件
+# ========================================
+@app.on_event("startup")
+async def startup_event():
+    """应用启动事件"""
+    logger.info("应用启动中...")
+    logger.info(f"Ollama Host: {OLLAMA_HOST}")
+    logger.info(f"Default Model: {DEFAULT_MODEL}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭事件"""
+    logger.info("应用关闭中...")
+
+
+# ========================================
+# 主入口
+# ========================================
+if __name__ == "__main__":
+    import uvicorn
+    
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=5000,
+        reload=True,
+        log_level="info"
+    )

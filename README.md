@@ -5,7 +5,7 @@
 ## 技术栈
 
 - **前端**: React 18 + Vite
-- **后端**: Python Flask
+- **后端**: Python FastAPI (已从Flask升级！)
 - **AI**: Ollama (本地大模型)
 - **框架**: LangChain (工具调用、会话记忆、LCEL Chain)
 
@@ -21,10 +21,11 @@ vibecoding-ollama-function-calling/
 │   ├── index.html
 │   ├── vite.config.js
 │   └── package.json
-├── backend/           # Flask后端服务
+├── backend/           # FastAPI后端服务
 │   ├── app.py        # API服务 (LangChain 集成)
 │   ├── tools.py      # 工具函数实现
-│   └── requirements.txt
+│   ├── requirements.txt
+│   └── .env          # 环境变量配置
 └── README.md
 ```
 
@@ -39,7 +40,7 @@ ollama serve
 ollama pull llama3.2  # 首次使用需下载模型
 ```
 
-### 2. 启动后端服务
+### 2. 启动 FastAPI 后端
 
 ```bash
 cd backend
@@ -47,7 +48,13 @@ pip install -r requirements.txt
 python app.py
 ```
 
-后端默认运行在 `http://localhost:5000`
+**或使用启动脚本:**
+- **Windows**: `start_fastapi.bat`
+- **Linux/macOS**: `bash start_fastapi.sh`
+
+后端运行在 `http://localhost:5000`
+- 📖 API文档: http://localhost:5000/docs
+- 📘 ReDoc: http://localhost:5000/redoc
 
 ### 3. 启动前端开发服务器
 
@@ -56,7 +63,7 @@ cd frontend
 npm run dev
 ```
 
-前端默认运行在 `http://localhost:3000`
+前端默认运行在 `http://localhost:5173`
 
 ## API 接口
 
@@ -132,10 +139,10 @@ DINGTALK_WEBHOOK_URL=https://oapi.dingtalk.com/robot/send?access_token=xxx
 ## 架构说明
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Frontend  │────▶│  Flask API  │────▶│   Ollama    │
-│   (React)   │◀────│ (LangChain) │◀────│   (LLM)     │
-└─────────────┘     └──────┬──────┘     └─────────────┘
+┌─────────────┐     ┌────────────┐     ┌─────────────┐
+│   Frontend  │────▶│ FastAPI    │────▶│   Ollama    │
+│   (React)   │◀────│ (LangChain)│◀────│   (LLM)     │
+└─────────────┘     └──────┬─────┘     └─────────────┘
                            │
                     ┌──────▼──────┐
                     │   Tools     │
