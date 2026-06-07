@@ -21,7 +21,8 @@ from tools import (
     get_weather as _get_weather,
     get_stock_price_cn as _get_stock_price_cn,
     send_email as _send_email,
-    send_dingtalk as _send_dingtalk
+    send_dingtalk as _send_dingtalk,
+    query_course
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -248,10 +249,26 @@ def send_dingtalk(message: str) -> str:
     )
 
 
+@tool
+def query_course_info(question: str) -> str:
+    """
+    查询《智能应用系统设计》课程相关信息，包括课程介绍、教学大纲、考核方式等。
+
+    参数:
+        question: 关于课程的问题，例如"课程考核方式是什么？"、"这门课学什么？"等
+
+    返回:
+        课程相关的问答结果，如果无法从资料中找到答案会返回相应提示
+    """
+    if not question:
+        return "请提供问题内容"
+    return query_course(question)
+
+
 # ========================================
 # LangChain 配置
 # ========================================
-TOOLS = [get_time, get_weather, get_stock_price, send_email_tool, send_dingtalk]
+TOOLS = [get_time, get_weather, get_stock_price, send_email_tool, send_dingtalk, query_course_info]
 tool_map = {tool.name: tool for tool in TOOLS}
 
 llm = ChatOllama(
@@ -263,7 +280,7 @@ llm = ChatOllama(
 llm_with_tools = llm.bind_tools(TOOLS)
 output_parser = JsonOutputParser()
 
-system_message = SystemMessage(content="""你是一个智能助手，可以帮助用户查询时间、天气、股票信息，发送邮件和钉钉消息。
+system_message = SystemMessage(content="""你是一个智能助手，可以帮助用户查询时间、天气、股票信息，发送邮件和钉钉消息，还可以回答《智能应用系统设计》课程相关问题。
 
 当用户请求执行工具操作时，请调用相应的工具。工具返回的结果会直接展示给用户。
 
@@ -489,6 +506,7 @@ async def startup_event():
     logger.info("应用启动中...")
     logger.info(f"Ollama Host: {OLLAMA_HOST}")
     logger.info(f"Default Model: {DEFAULT_MODEL}")
+    logger.info("RAG 系统将在首次查询时懒加载...")
 
 
 @app.on_event("shutdown")

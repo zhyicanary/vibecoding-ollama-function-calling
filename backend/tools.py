@@ -5,6 +5,150 @@ import pytz
 import smtplib
 from email.mime.text import MIMEText
 from email.header import Header
+import os
+
+rag_vectorstore = None
+rag_retriever = None
+rag_reranker = None
+rag_llm = None
+rag_prompt = None
+rag_initialized = False
+
+
+def init_rag():
+    """初始化 RAG 系统"""
+    global rag_vectorstore, rag_retriever, rag_reranker, rag_llm, rag_prompt, rag_initialized
+    
+    if rag_initialized:
+        return {"status": "success", "message": "RAG 系统已初始化"}
+    
+    from langchain_community.document_loaders import UnstructuredMarkdownLoader
+    from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+    from langchain_ollama import OllamaEmbeddings, ChatOllama
+    from langchain_community.vectorstores import Chroma
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.output_parsers import StrOutputParser
+    from langchain_core.runnables import RunnableLambda
+    from langchain_community.retrievers import BM25Retriever
+    from langchain_classic.retrievers import EnsembleRetriever
+    from sentence_transformers import CrossEncoder
+    
+    md_path = os.path.join(os.path.dirname(__file__), os.environ.get('COURSE_DOC_PATH', '../《智能应用系统设计》课程介绍.md'))
+    
+    if not os.path.exists(md_path):
+        return {"status": "error", "message": f"课程介绍文件不存在: {md_path}"}
+    
+    with open(md_path, encoding="utf-8") as f:
+        md_text = f.read()
+    
+    header_splitter = MarkdownHeaderTextSplitter(
+        headers_to_split_on=[("#", "h1"), ("##", "h2"), ("###", "h3")],
+        strip_headers=False
+    )
+    header_splits = header_splitter.split_text(md_text)
+    
+    char_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=50,
+        separators=["\n\n", "\n", "。", "，", " ", ""]
+    )
+    splits = char_splitter.split_documents(header_splits)
+    
+    embeddings = OllamaEmbeddings(
+        model="qwen3-embedding:4b",
+        base_url="http://localhost:11434"
+    )
+    
+    vectorstore = Chroma.from_documents(
+        documents=splits,
+        embedding=embeddings,
+        persist_directory="./chroma_db"
+    )
+    
+    vector_retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
+    bm25_retriever = BM25Retriever.from_documents(splits)
+    bm25_retriever.k = 6
+    
+    rag_retriever = EnsembleRetriever(
+        retrievers=[vector_retriever, bm25_retriever],
+        weights=[0.5, 0.5]
+    )
+    
+    rag_reranker = CrossEncoder("BAAI/bge-reranker-base")
+    
+    rag_prompt = ChatPromptTemplate.from_template("""
+你是一个课程信息助手。请严格根据下方【参考资料】回答用户问题。
+
+规则：
+- 只能使用【参考资料】中出现的信息
+- 如果资料中没有明确答案，请回答"根据已有资料无法确认"
+- 不要编造或推测任何数字、名称
+
+【参考资料】
+{context}
+
+【用户问题】
+{question}
+
+【回答】
+""")
+    
+    rag_llm = ChatOllama(
+        model="qwen3:8b",
+        base_url="http://localhost:11434",
+        temperature=0
+    )
+    
+    rag_vectorstore = vectorstore
+    rag_initialized = True
+    
+    return {"status": "success", "message": "RAG 系统初始化成功"}
+
+
+def query_course(question):
+    """查询课程信息"""
+    global rag_retriever, rag_reranker, rag_llm, rag_prompt, rag_initialized
+    
+    if not rag_initialized:
+        init_result = init_rag()
+        if init_result.get("status") != "success":
+            return json.dumps(init_result, ensure_ascii=False)
+    
+    try:
+        docs = rag_retriever.invoke(question)
+        
+        if not docs:
+            return "未找到相关内容，请尝试其他问题"
+        
+        pairs = [[question, doc.page_content] for doc in docs]
+        scores = rag_reranker.predict(pairs)
+        scored_docs = list(zip(docs, scores))
+        scored_docs.sort(key=lambda x: x[1], reverse=True)
+        top_docs = [doc for doc, score in scored_docs[:4]]
+        
+        context = "\n\n---\n\n".join(
+            f"[来源：{doc.metadata}]\n{doc.page_content}"
+            for doc in top_docs
+        )
+        
+        from langchain_core.runnables import RunnablePassthrough
+        from langchain_core.output_parsers import StrOutputParser
+        
+        def get_context(x):
+            return context
+        
+        chain = (
+            {"context": RunnableLambda(get_context), "question": RunnablePassthrough()}
+            | rag_prompt
+            | rag_llm
+            | StrOutputParser()
+        )
+        
+        answer = chain.invoke(question)
+        return answer
+        
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"查询失败: {str(e)}"}, ensure_ascii=False)
 
 
 def send_email(to_email, subject, content, from_email=None, from_password=None, smtp_server='smtp.qq.com', smtp_port=465):

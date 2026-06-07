@@ -6,3 +6,5 @@ __pycache__/
 .DS_Store
 test/
 frontend/package-lock.json
+# backend/.env
+backend/chroma_db
