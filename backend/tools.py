@@ -1,5 +1,6 @@
 import requests
 import json
+import time
 from datetime import datetime
 import pytz
 import smtplib
@@ -20,7 +21,11 @@ def init_rag():
     global rag_vectorstore, rag_retriever, rag_reranker, rag_llm, rag_prompt, rag_initialized
     
     if rag_initialized:
+        print("[RAG] 已初始化，跳过")
         return {"status": "success", "message": "RAG 系统已初始化"}
+    
+    print("[RAG] 开始初始化...")
+    start_time = time.time()
     
     from langchain_community.document_loaders import UnstructuredMarkdownLoader
     from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
@@ -102,6 +107,9 @@ def init_rag():
     rag_vectorstore = vectorstore
     rag_initialized = True
     
+    elapsed = time.time() - start_time
+    print(f"[RAG] 初始化完成，耗时 {elapsed:.2f}秒")
+    
     return {"status": "success", "message": "RAG 系统初始化成功"}
 
 
@@ -109,12 +117,15 @@ def query_course(question):
     """查询课程信息"""
     global rag_retriever, rag_reranker, rag_llm, rag_prompt, rag_initialized
     
+    print(f"[RAG] query_course 调用，rag_initialized={rag_initialized}")
+    
     if not rag_initialized:
         init_result = init_rag()
         if init_result.get("status") != "success":
             return json.dumps(init_result, ensure_ascii=False)
     
     try:
+        print(f"[RAG] 执行检索: {question[:20]}...")
         docs = rag_retriever.invoke(question)
         
         if not docs:
@@ -131,7 +142,7 @@ def query_course(question):
             for doc in top_docs
         )
         
-        from langchain_core.runnables import RunnablePassthrough
+        from langchain_core.runnables import RunnablePassthrough, RunnableLambda
         from langchain_core.output_parsers import StrOutputParser
         
         def get_context(x):
