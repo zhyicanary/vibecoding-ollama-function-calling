@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 import json
 import os
-from typing import Optional, List
+from typing import Optional, List, TypedDict, Literal, Any, Dict
 from pydantic import BaseModel
 from datetime import datetime
 from dotenv import load_dotenv
@@ -11,10 +11,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from langchain_ollama import ChatOllama
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
-from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.runnables import RunnableWithMessageHistory
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import tool
+from langgraph.graph import StateGraph, END
+from routing import route_request
 
 from tools import (
     get_current_time as _get_current_time,
@@ -277,9 +277,6 @@ llm = ChatOllama(
     temperature=0.7
 )
 
-llm_with_tools = llm.bind_tools(TOOLS)
-output_parser = JsonOutputParser()
-
 system_message = SystemMessage(content="""你是一个智能助手，可以帮助用户查询时间、天气、股票信息，发送邮件和钉钉消息，还可以回答《智能应用系统设计》课程相关问题。
 
 当用户请求执行工具操作时，请调用相应的工具。工具返回的结果会直接展示给用户。
@@ -287,69 +284,74 @@ system_message = SystemMessage(content="""你是一个智能助手，可以帮�
 回答问题时请简洁明了，对于工具返回的信息，适当整理后告知用户。""")
 
 
-def build_chain():
-    """构建LCEL Chain"""
-    from langchain_core.runnables import RunnablePassthrough
+class ChatState(TypedDict, total=False):
+    input: str
+    session_id: str
+    route: Literal["tool", "chat"]
+    tool_name: str
+    tool_args: Dict[str, Any]
+    response: str
 
-    def prepare_messages(x):
-        session_id = x.get("session_id", "default")
-        history = get_session_history(session_id)
-        messages = [system_message] + history + [HumanMessage(content=x["input"])]
-        return {"messages": messages, "session_id": session_id}
 
-    chain = (
-        RunnablePassthrough.assign(messages=prepare_messages)
-        | (lambda x: x["messages"])
-        | llm_with_tools
+def run_selected_tool(state: ChatState) -> ChatState:
+    tool_name = state.get("tool_name")
+    tool_args = state.get("tool_args", {})
+
+    if not tool_name or tool_name not in tool_map:
+        return {"response": "抱歉，当前没有可用的工具。"}
+
+    try:
+        result = tool_map[tool_name].invoke(tool_args)
+        return {"response": str(result)}
+    except Exception as e:
+        logger.error(f"工具执行失败: {e}")
+        return {"response": f"工具执行失败: {str(e)}"}
+
+
+def chat_with_llm(state: ChatState) -> ChatState:
+    session_id = state.get("session_id", "default")
+    history = get_session_history(session_id)
+    messages = [system_message] + history + [HumanMessage(content=state["input"])]
+    response = llm.invoke(messages)
+    return {"response": response.content if hasattr(response, "content") else str(response)}
+
+
+def build_graph():
+    workflow = StateGraph(ChatState)
+
+    workflow.add_node("router", lambda state: route_request(state["input"]))
+    workflow.add_node("tool", run_selected_tool)
+    workflow.add_node("chat", chat_with_llm)
+
+    workflow.set_entry_point("router")
+    workflow.add_conditional_edges(
+        "router",
+        lambda state: state.get("route", "chat"),
+        {
+            "tool": "tool",
+            "chat": "chat",
+        },
     )
+    workflow.add_edge("tool", END)
+    workflow.add_edge("chat", END)
 
-    return chain
+    return workflow.compile()
 
 
-chain = build_chain()
-
-chain_with_history = RunnableWithMessageHistory(
-    chain,
-    get_session_history=get_session_history,
-    input_messages_key="input",
-    history_messages_key="history"
-)
+conversation_graph = build_graph()
 
 
 def invoke_with_tools(input_text: str, session_id: str):
-    """带工具执行的完整调用，使用 LCEL Chain 和 Memory"""
-    messages = [system_message] + get_session_history(session_id) + [HumanMessage(content=input_text)]
+    """使用 LangGraph 先路由再执行，避免小模型自行决定是否调用工具。"""
+    state = conversation_graph.invoke({"input": input_text, "session_id": session_id})
+    response_text = state.get("response", "")
 
-    max_iterations = 5
-    current_iteration = 0
+    get_session_history(session_id).extend([
+        HumanMessage(content=input_text),
+        AIMessage(content=response_text),
+    ])
 
-    while current_iteration < max_iterations:
-        current_iteration += 1
-        response = llm_with_tools.invoke(messages)
-
-        if not hasattr(response, 'tool_calls') or not response.tool_calls:
-            get_session_history(session_id).extend([HumanMessage(content=input_text), response])
-            return response
-
-        for tool_call in response.tool_calls:
-            tool_name = tool_call.get('name')
-            tool_args = tool_call.get('args', {})
-
-            logger.info(f"执行工具: {tool_name}, 参数: {tool_args}")
-
-            if tool_name in tool_map:
-                try:
-                    result = tool_map[tool_name].invoke(tool_args)
-                    messages.append(ToolMessage(content=str(result), tool_call_id=tool_call.get('id')))
-                except Exception as e:
-                    logger.error(f"工具执行失败: {e}")
-                    messages.append(ToolMessage(content=f"工具执行失败: {str(e)}", tool_call_id=tool_call.get('id')))
-            else:
-                messages.append(ToolMessage(content=f"未知工具: {tool_name}", tool_call_id=tool_call.get('id')))
-
-        get_session_history(session_id).extend([HumanMessage(content=input_text), response])
-
-    return response
+    return AIMessage(content=response_text)
 
 
 # ========================================

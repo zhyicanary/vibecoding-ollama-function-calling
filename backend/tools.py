@@ -7,6 +7,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.header import Header
 import os
+from urllib.parse import quote
 
 rag_vectorstore = None
 rag_retriever = None
@@ -241,22 +242,116 @@ def get_current_time(timezone='Asia/Shanghai', format='full'):
 def get_weather(city):
     """获取城市天气"""
     try:
-        url = f"https://wttr.in/{city}?format=j1"
-        response = requests.get(url, timeout=10)
-        
+        def weather_code_to_text(code):
+            code_map = {
+                0: "晴朗",
+                1: "大致晴朗",
+                2: "局部多云",
+                3: "多云",
+                45: "有雾",
+                48: "有雾凇",
+                51: "小毛毛雨",
+                53: "毛毛雨",
+                55: "强毛毛雨",
+                61: "小雨",
+                63: "中雨",
+                65: "大雨",
+                71: "小雪",
+                73: "中雪",
+                75: "大雪",
+                80: "阵雨",
+                81: "强阵雨",
+                82: "猛烈阵雨",
+                95: "雷暴",
+                96: "雷暴伴冰雹",
+                99: "强雷暴伴冰雹",
+            }
+            return code_map.get(int(code), "未知")
+
+        city = city.strip()
+        city_encoded = quote(city)
+
+        # 先通过 Open-Meteo 地理编码获取经纬度，再查实时天气，避免中文城市名直连不稳定。
+        geocode_url = (
+            "https://geocoding-api.open-meteo.com/v1/search"
+            f"?name={city_encoded}&count=1&language=zh&format=json"
+        )
+        geocode_response = requests.get(
+            geocode_url,
+            timeout=10,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json,*/*",
+            },
+        )
+
+        if geocode_response.status_code == 200:
+            geocode_data = geocode_response.json()
+            results = geocode_data.get("results") or []
+            if results:
+                place = results[0]
+                latitude = place["latitude"]
+                longitude = place["longitude"]
+                location_name = place.get("name", city)
+
+                forecast_url = (
+                    "https://api.open-meteo.com/v1/forecast"
+                    f"?latitude={latitude}&longitude={longitude}"
+                    "&current=temperature_2m,apparent_temperature,weather_code,relative_humidity_2m,wind_speed_10m"
+                    "&timezone=auto"
+                )
+                forecast_response = requests.get(
+                    forecast_url,
+                    timeout=10,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept": "application/json,*/*",
+                    },
+                )
+
+                if forecast_response.status_code == 200:
+                    forecast_data = forecast_response.json()
+                    current = forecast_data.get("current", {})
+                    weather_code = current.get("weather_code", -1)
+                    temp_c = current.get("temperature_2m", "N/A")
+                    feels_like = current.get("apparent_temperature", "N/A")
+                    humidity = current.get("relative_humidity_2m", "N/A")
+                    wind_kmh = current.get("wind_speed_10m", "N/A")
+                    weather_desc = weather_code_to_text(weather_code)
+
+                    return (
+                        f"{location_name}天气:\n"
+                        f"- 温度: {temp_c}°C (体感 {feels_like}°C)\n"
+                        f"- 天气: {weather_desc}\n"
+                        f"- 湿度: {humidity}%\n"
+                        f"- 风速: {wind_kmh} km/h"
+                    )
+
+        # 回退到 wttr.in，避免单一服务故障
+        wttr_url = f"https://wttr.in/{city_encoded}?format=j1&lang=zh-cn"
+        response = requests.get(
+            wttr_url,
+            timeout=10,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json,text/plain,*/*",
+            },
+        )
+
         if response.status_code == 200:
             data = response.json()
             current = data.get('current_condition', [{}])[0]
-            
+
             weather_desc = current.get('weatherDesc', [{}])[0].get('value', '未知')
             temp_C = current.get('temp_C', 'N/A')
             humidity = current.get('humidity', 'N/A')
             wind_kmh = current.get('windspeedKmh', 'N/A')
             feelslike = current.get('FeelsLikeC', 'N/A')
-            
+
             return f"{city}天气:\n- 温度: {temp_C}°C (体感 {feelslike}°C)\n- 天气: {weather_desc}\n- 湿度: {humidity}%\n- 风速: {wind_kmh} km/h"
-        else:
-            return f"无法获取{city}的天气信息"
+
+        status = response.status_code if response is not None else 'N/A'
+        return f"无法获取{city}的天气信息（HTTP {status}）"
     except Exception as e:
         return f"获取天气失败: {str(e)}"
 

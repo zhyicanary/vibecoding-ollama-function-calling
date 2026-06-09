@@ -74,6 +74,40 @@ npm run dev
 | `/api/history/<session_id>` | DELETE | 清除指定会话的历史记录 |
 | `/api/health` | GET | 健康检查 |
 
+## 变更说明（重要）
+
+- **路由稳定性改进**：将“模型自行决定是否调用工具”的逻辑迁移到显式路由层，新增文件 [backend/routing.py](backend/routing.py#L44) 负责基于规则把高确定性意图（例如时间、天气、股票、课程问答）路由到对应工具，避免小模型漏判导致的幻觉或错误调用。
+- **天气服务改造**：`get_weather` 已从单一 `wttr.in` 替换为优先使用 Open‑Meteo 的地理编码 + 实时查询，失败时回退 `wttr.in`，实现见 [backend/tools.py](backend/tools.py#L230)。这能更稳地支持中文城市名（例如“广州”）。
+- **测试覆盖**：新增/更新路由与天气单元测试：
+  - [backend/test/test_routing.py](backend/test/test_routing.py#L1) — 覆盖多种日期/天气/股票问法的路由断言。
+  - [backend/test/test_weather_tool.py](backend/test/test_weather_tool.py#L1) — mock 验证地理编码+天气查询链路。
+- **依赖更新**：已在 [backend/requirements.txt](backend/requirements.txt#L13) 中加入 `langgraph==1.1.10`，并在运行环境中安装了 `pytz`。
+
+## 快速重启与自检
+
+在你本地将后端代码更新后，需要重启后端进程以加载新实现（重启会话内启用新的路由与天气实现）。示例命令：
+
+```powershell
+conda activate langchain
+cd backend
+python app.py
+```
+
+本地运行和测试示例：
+
+```powershell
+# 只做语法检查
+python -m py_compile backend\app.py backend\routing.py backend\tools.py backend\test\test_routing.py backend\test\test_weather_tool.py
+
+# 运行路由单测（简单脚本测试）
+python backend\test\test_routing.py
+
+# 运行天气单测（mock 测试）
+python backend\test\test_weather_tool.py
+```
+
+如果你仍然在浏览器或前端看到旧行为，请先按上面重启后端；若仍异常，我可以远程协助你重启并在日志中定位具体错误。
+
 ### Chat API
 
 **请求**
