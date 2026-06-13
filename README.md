@@ -63,7 +63,7 @@ cd frontend
 npm run dev
 ```
 
-前端默认运行在 `http://localhost:5173`
+前端默认运行在 `http://localhost:3000`
 
 ## API 接口
 
@@ -137,12 +137,19 @@ python backend\test\test_weather_tool.py
 ```
 OLLAMA_HOST=http://localhost:11434
 DEFAULT_MODEL=llama3.2
+CORS_ORIGINS=http://localhost:3000
 PORT=5000
 SMTP_SERVER=smtp.qq.com
 SMTP_PORT=587
 FROM_EMAIL=your_email@example.com
 SMTP_PASSWORD=your_password
 DINGTALK_WEBHOOK_URL=https://oapi.dingtalk.com/robot/send?access_token=xxx
+CHROMA_DIR=backend/chroma_db
+COURSE_DOC_PATH=../docs/《智能应用系统设计》课程介绍.md
+RAG_EMBEDDING_MODEL=qwen3-embedding:4b
+RAG_LLM_MODEL=qwen3:8b
+RAG_RERANKER_MODEL=BAAI/bge-reranker-base
+RAG_PDF_PATH=backend/软件与人工智能学院本科生学业预警实施办法.pdf
 ```
 
 ## 功能特性

@@ -16,6 +16,17 @@ rag_llm = None
 rag_prompt = None
 rag_initialized = False
 
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+RAG_EMBEDDING_MODEL = os.environ.get("RAG_EMBEDDING_MODEL", "qwen3-embedding:4b")
+RAG_LLM_MODEL = os.environ.get("RAG_LLM_MODEL", "qwen3:8b")
+
+
+def _resolve_path(path_value: str, default_relative: str) -> str:
+    candidate = path_value or default_relative
+    if os.path.isabs(candidate):
+        return candidate
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), candidate))
+
 
 def init_rag():
     """初始化 RAG 系统"""
@@ -39,7 +50,14 @@ def init_rag():
     from langchain_classic.retrievers import EnsembleRetriever
     from sentence_transformers import CrossEncoder
     
-    md_path = os.path.join(os.path.dirname(__file__), os.environ.get('COURSE_DOC_PATH', '../《智能应用系统设计》课程介绍.md'))
+    md_path = _resolve_path(
+        os.environ.get("COURSE_DOC_PATH", ""),
+        os.path.join("..", "docs", "《智能应用系统设计》课程介绍.md")
+    )
+    chroma_dir = _resolve_path(
+        os.environ.get("CHROMA_DIR", ""),
+        "chroma_db"
+    )
     
     if not os.path.exists(md_path):
         return {"status": "error", "message": f"课程介绍文件不存在: {md_path}"}
@@ -61,14 +79,14 @@ def init_rag():
     splits = char_splitter.split_documents(header_splits)
     
     embeddings = OllamaEmbeddings(
-        model="qwen3-embedding:4b",
-        base_url="http://localhost:11434"
+        model=RAG_EMBEDDING_MODEL,
+        base_url=OLLAMA_HOST
     )
     
     vectorstore = Chroma.from_documents(
         documents=splits,
         embedding=embeddings,
-        persist_directory="./chroma_db"
+        persist_directory=chroma_dir
     )
     
     vector_retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
@@ -100,8 +118,8 @@ def init_rag():
 """)
     
     rag_llm = ChatOllama(
-        model="qwen3:8b",
-        base_url="http://localhost:11434",
+        model=RAG_LLM_MODEL,
+        base_url=OLLAMA_HOST,
         temperature=0
     )
     

@@ -12,10 +12,15 @@ from sentence_transformers import CrossEncoder
 import streamlit as st
 from langchain_ollama import OllamaEmbeddings,ChatOllama
 # ================= 配置区 =================
-PDF_PATH = "软件与人工智能学院本科生学业预警实施办法.pdf"
-EMBEDDING_MODEL = "qwen3-embedding:4b"
-RERANKER_MODEL = "BAAI/bge-reranker-base"
-LLM_MODEL = "qwen3:8b"
+BASE_DIR = os.path.dirname(__file__)
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+PDF_PATH = os.environ.get(
+    "RAG_PDF_PATH",
+    os.path.join(BASE_DIR, "软件与人工智能学院本科生学业预警实施办法.pdf")
+)
+EMBEDDING_MODEL = os.environ.get("RAG_EMBEDDING_MODEL", "qwen3-embedding:4b")
+RERANKER_MODEL = os.environ.get("RAG_RERANKER_MODEL", "BAAI/bge-reranker-base")
+LLM_MODEL = os.environ.get("RAG_LLM_MODEL", "qwen3:8b")
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 100
 TOP_K_RETRIEVE = 10      # 混合检索召回数量
@@ -36,7 +41,7 @@ def load_and_split_documents(pdf_path):
 # ================= 2. 构建混合检索器 =================
 def build_ensemble_retriever(splits):
     # 向量检索
-    embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
+    embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL, base_url=OLLAMA_HOST)
     vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
     vector_retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K_RETRIEVE})
     
@@ -97,7 +102,7 @@ def main():
         ensemble_retriever = build_ensemble_retriever(splits)
         rerank_retriever = RerankRetriever(ensemble_retriever, RERANKER_MODEL, TOP_K_RERANK)
         
-        llm = ChatOllama(model=LLM_MODEL, temperature=0)
+        llm = ChatOllama(model=LLM_MODEL, temperature=0, base_url=OLLAMA_HOST)
         prompt = PromptTemplate.from_template(PROMPT_TEMPLATE)
         
         rag_chain = (

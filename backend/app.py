@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 import json
 import os
+import requests
 from typing import Optional, List, TypedDict, Literal, Any, Dict
 from pydantic import BaseModel
 from datetime import datetime
@@ -37,20 +38,18 @@ app = FastAPI(
     version="2.0.0"
 )
 
-# 添加CORS中间件
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # ========================================
 # 配置参数
 # ========================================
 OLLAMA_HOST = os.environ.get('OLLAMA_HOST', 'http://localhost:11434')
 DEFAULT_MODEL = os.environ.get('DEFAULT_MODEL', 'llama3.2')
+LLM_TEMPERATURE = float(os.environ.get('LLM_TEMPERATURE', '0.7'))
+
+CORS_ORIGINS = os.environ.get('CORS_ORIGINS', 'http://localhost:3000')
+ALLOWED_ORIGINS = [origin.strip() for origin in CORS_ORIGINS.split(',') if origin.strip()]
+if not ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS = ["http://localhost:3000"]
+ALLOW_CREDENTIALS = "*" not in ALLOWED_ORIGINS
 
 SMTP_CONFIG = {
     'smtp_server': os.environ.get('SMTP_SERVER', 'smtp.qq.com'),
@@ -65,6 +64,15 @@ DINGTALK_CONFIG = {
 
 session_history_store = {}
 
+# 添加CORS中间件
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=ALLOW_CREDENTIALS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ========================================
 # Pydantic 模型定义
 # ========================================
@@ -72,12 +80,14 @@ class ChatRequest(BaseModel):
     """聊天请求模型"""
     message: str
     session_id: str = "default"
+    model: Optional[str] = None
 
     class Config:
         json_schema_extra = {
             "example": {
                 "message": "北京今天天气怎么样？",
-                "session_id": "user123"
+                "session_id": "user123",
+                "model": "llama3.2"
             }
         }
 
@@ -271,11 +281,20 @@ def query_course_info(question: str) -> str:
 TOOLS = [get_time, get_weather, get_stock_price, send_email_tool, send_dingtalk, query_course_info]
 tool_map = {tool.name: tool for tool in TOOLS}
 
-llm = ChatOllama(
-    model=DEFAULT_MODEL,
-    base_url=OLLAMA_HOST,
-    temperature=0.7
-)
+_llm_cache: Dict[str, ChatOllama] = {}
+
+
+def get_llm(model_name: Optional[str]) -> ChatOllama:
+    selected_model = model_name or DEFAULT_MODEL
+    cached = _llm_cache.get(selected_model)
+    if cached is None:
+        cached = ChatOllama(
+            model=selected_model,
+            base_url=OLLAMA_HOST,
+            temperature=LLM_TEMPERATURE
+        )
+        _llm_cache[selected_model] = cached
+    return cached
 
 system_message = SystemMessage(content="""你是一个智能助手，可以帮助用户查询时间、天气、股票信息，发送邮件和钉钉消息，还可以回答《智能应用系统设计》课程相关问题。
 
@@ -287,6 +306,7 @@ system_message = SystemMessage(content="""你是一个智能助手，可以帮�
 class ChatState(TypedDict, total=False):
     input: str
     session_id: str
+    model: Optional[str]
     route: Literal["tool", "chat"]
     tool_name: str
     tool_args: Dict[str, Any]
@@ -310,9 +330,10 @@ def run_selected_tool(state: ChatState) -> ChatState:
 
 def chat_with_llm(state: ChatState) -> ChatState:
     session_id = state.get("session_id", "default")
+    model_name = state.get("model")
     history = get_session_history(session_id)
     messages = [system_message] + history + [HumanMessage(content=state["input"])]
-    response = llm.invoke(messages)
+    response = get_llm(model_name).invoke(messages)
     return {"response": response.content if hasattr(response, "content") else str(response)}
 
 
@@ -341,9 +362,13 @@ def build_graph():
 conversation_graph = build_graph()
 
 
-def invoke_with_tools(input_text: str, session_id: str):
+def invoke_with_tools(input_text: str, session_id: str, model: Optional[str]):
     """使用 LangGraph 先路由再执行，避免小模型自行决定是否调用工具。"""
-    state = conversation_graph.invoke({"input": input_text, "session_id": session_id})
+    state = conversation_graph.invoke({
+        "input": input_text,
+        "session_id": session_id,
+        "model": model
+    })
     response_text = state.get("response", "")
 
     get_session_history(session_id).extend([
@@ -376,9 +401,14 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="消息不能为空")
 
     try:
-        logger.info(f"处理用户消息: {request.message}, session_id: {request.session_id}")
+        logger.info(
+            "处理用户消息: %s, session_id: %s, model: %s",
+            request.message,
+            request.session_id,
+            request.model or DEFAULT_MODEL
+        )
 
-        response = invoke_with_tools(request.message, request.session_id)
+        response = invoke_with_tools(request.message, request.session_id, request.model)
 
         if hasattr(response, 'content'):
             return ChatResponse(response=response.content, success=True)
@@ -452,9 +482,17 @@ async def health():
     Returns:
         系统健康状态信息
     """
+    ollama_status = "disconnected"
+    try:
+        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=2)
+        if response.status_code == 200:
+            ollama_status = "connected"
+    except Exception as e:
+        logger.warning("Ollama 健康检查失败: %s", e)
+
     return HealthResponse(
-        status="ok",
-        ollama="connected",
+        status="ok" if ollama_status == "connected" else "degraded",
+        ollama=ollama_status,
         model=DEFAULT_MODEL,
         ollama_host=OLLAMA_HOST
     )
