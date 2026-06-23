@@ -1,13 +1,14 @@
-import requests
 import json
+import os
+import smtplib
 import time
 from datetime import datetime
-import pytz
-import smtplib
-from email.mime.text import MIMEText
 from email.header import Header
-import os
+from email.mime.text import MIMEText
 from urllib.parse import quote
+
+import pytz
+import requests
 
 rag_vectorstore = None
 rag_retriever = None
@@ -18,7 +19,7 @@ rag_initialized = False
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 RAG_EMBEDDING_MODEL = os.environ.get("RAG_EMBEDDING_MODEL", "qwen3-embedding:4b")
-RAG_LLM_MODEL = os.environ.get("RAG_LLM_MODEL", "qwen3:8b")
+RAG_LLM_MODEL = os.environ.get("RAG_LLM_MODEL", "qwen3.5:4b")
 
 
 def _resolve_path(path_value: str, default_relative: str) -> str:
@@ -30,76 +31,73 @@ def _resolve_path(path_value: str, default_relative: str) -> str:
 
 def init_rag():
     """初始化 RAG 系统"""
-    global rag_vectorstore, rag_retriever, rag_reranker, rag_llm, rag_prompt, rag_initialized
-    
+    global \
+        rag_vectorstore, \
+        rag_retriever, \
+        rag_reranker, \
+        rag_llm, \
+        rag_prompt, \
+        rag_initialized
+
     if rag_initialized:
         print("[RAG] 已初始化，跳过")
         return {"status": "success", "message": "RAG 系统已初始化"}
-    
+
     print("[RAG] 开始初始化...")
     start_time = time.time()
-    
+
     from langchain_community.document_loaders import UnstructuredMarkdownLoader
-    from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
-    from langchain_ollama import OllamaEmbeddings, ChatOllama
+    from langchain_community.retrievers import BM25Retriever, EnsembleRetriever
     from langchain_community.vectorstores import Chroma
-    from langchain_core.prompts import ChatPromptTemplate
     from langchain_core.output_parsers import StrOutputParser
+    from langchain_core.prompts import ChatPromptTemplate
     from langchain_core.runnables import RunnableLambda
-    from langchain_community.retrievers import BM25Retriever
-    from langchain_community.retrievers import EnsembleRetriever
+    from langchain_ollama import ChatOllama, OllamaEmbeddings
+    from langchain_text_splitters import (
+        MarkdownHeaderTextSplitter,
+        RecursiveCharacterTextSplitter,
+    )
     from sentence_transformers import CrossEncoder
-    
+
     md_path = _resolve_path(
         os.environ.get("COURSE_DOC_PATH", ""),
-        os.path.join("..", "docs", "《智能应用系统设计》课程介绍.md")
+        os.path.join("..", "docs", "《智能应用系统设计》课程介绍.md"),
     )
-    chroma_dir = _resolve_path(
-        os.environ.get("CHROMA_DIR", ""),
-        "chroma_db"
-    )
-    
+    chroma_dir = _resolve_path(os.environ.get("CHROMA_DIR", ""), "chroma_db")
+
     if not os.path.exists(md_path):
         return {"status": "error", "message": f"课程介绍文件不存在: {md_path}"}
-    
+
     with open(md_path, encoding="utf-8") as f:
         md_text = f.read()
-    
+
     header_splitter = MarkdownHeaderTextSplitter(
         headers_to_split_on=[("#", "h1"), ("##", "h2"), ("###", "h3")],
-        strip_headers=False
+        strip_headers=False,
     )
     header_splits = header_splitter.split_text(md_text)
-    
+
     char_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50,
-        separators=["\n\n", "\n", "。", "，", " ", ""]
+        chunk_size=500, chunk_overlap=50, separators=["\n\n", "\n", "。", "，", " ", ""]
     )
     splits = char_splitter.split_documents(header_splits)
-    
-    embeddings = OllamaEmbeddings(
-        model=RAG_EMBEDDING_MODEL,
-        base_url=OLLAMA_HOST
-    )
-    
+
+    embeddings = OllamaEmbeddings(model=RAG_EMBEDDING_MODEL, base_url=OLLAMA_HOST)
+
     vectorstore = Chroma.from_documents(
-        documents=splits,
-        embedding=embeddings,
-        persist_directory=chroma_dir
+        documents=splits, embedding=embeddings, persist_directory=chroma_dir
     )
-    
+
     vector_retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
     bm25_retriever = BM25Retriever.from_documents(splits)
     bm25_retriever.k = 6
-    
+
     rag_retriever = EnsembleRetriever(
-        retrievers=[vector_retriever, bm25_retriever],
-        weights=[0.5, 0.5]
+        retrievers=[vector_retriever, bm25_retriever], weights=[0.5, 0.5]
     )
-    
+
     rag_reranker = CrossEncoder("BAAI/bge-reranker-base")
-    
+
     rag_prompt = ChatPromptTemplate.from_template("""
 你是一个课程信息助手。请严格根据下方【参考资料】回答用户问题。
 
@@ -116,72 +114,77 @@ def init_rag():
 
 【回答】
 """)
-    
-    rag_llm = ChatOllama(
-        model=RAG_LLM_MODEL,
-        base_url=OLLAMA_HOST,
-        temperature=0
-    )
-    
+
+    rag_llm = ChatOllama(model=RAG_LLM_MODEL, base_url=OLLAMA_HOST, temperature=0)
+
     rag_vectorstore = vectorstore
     rag_initialized = True
-    
+
     elapsed = time.time() - start_time
     print(f"[RAG] 初始化完成，耗时 {elapsed:.2f}秒")
-    
+
     return {"status": "success", "message": "RAG 系统初始化成功"}
 
 
 def query_course(question):
     """查询课程信息"""
     global rag_retriever, rag_reranker, rag_llm, rag_prompt, rag_initialized
-    
+
     print(f"[RAG] query_course 调用，rag_initialized={rag_initialized}")
-    
+
     if not rag_initialized:
         init_result = init_rag()
         if init_result.get("status") != "success":
             return json.dumps(init_result, ensure_ascii=False)
-    
+
     try:
         print(f"[RAG] 执行检索: {question[:20]}...")
         docs = rag_retriever.invoke(question)
-        
+
         if not docs:
             return "未找到相关内容，请尝试其他问题"
-        
+
         pairs = [[question, doc.page_content] for doc in docs]
         scores = rag_reranker.predict(pairs)
         scored_docs = list(zip(docs, scores))
         scored_docs.sort(key=lambda x: x[1], reverse=True)
         top_docs = [doc for doc, score in scored_docs[:4]]
-        
+
         context = "\n\n---\n\n".join(
-            f"[来源：{doc.metadata}]\n{doc.page_content}"
-            for doc in top_docs
+            f"[来源：{doc.metadata}]\n{doc.page_content}" for doc in top_docs
         )
-        
-        from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+
         from langchain_core.output_parsers import StrOutputParser
-        
+        from langchain_core.runnables import RunnableLambda, RunnablePassthrough
+
         def get_context(x):
             return context
-        
+
         chain = (
             {"context": RunnableLambda(get_context), "question": RunnablePassthrough()}
             | rag_prompt
             | rag_llm
             | StrOutputParser()
         )
-        
+
         answer = chain.invoke(question)
         return answer
-        
+
     except Exception as e:
-        return json.dumps({"status": "error", "message": f"查询失败: {str(e)}"}, ensure_ascii=False)
+        return json.dumps(
+            {"status": "error", "message": f"查询失败: {str(e)}"}, ensure_ascii=False
+        )
 
 
-def send_email(to_email, subject, content, from_email=None, from_password=None, smtp_server='smtp.qq.com', smtp_port=465):
+def send_email(
+    to_email,
+    subject,
+    content,
+    from_email=None,
+    from_password=None,
+    smtp_server="smtp.qq.com",
+    smtp_port=465,
+):
     """
     通过SMTP协议发送邮件
     :param to_email: 收件人邮箱
@@ -194,65 +197,65 @@ def send_email(to_email, subject, content, from_email=None, from_password=None, 
     :return: JSON格式的发送结果，包含status(状态)、message(信息)、to(收件人)、subject(主题)、send_time(发送时间)
     """
     import os
-    
+
     if from_email is None:
-        from_email = os.environ.get('FROM_EMAIL', 'your_email@example.com')
+        from_email = os.environ.get("FROM_EMAIL", "your_email@example.com")
     if from_password is None:
-        from_password = os.environ.get('SMTP_PASSWORD', 'your_password')
-    
-    send_time = datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')
-    
+        from_password = os.environ.get("SMTP_PASSWORD", "your_password")
+
+    send_time = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
+
     try:
-        msg = MIMEText(content, 'plain', 'utf-8')
-        msg['Subject'] = Header(subject, 'utf-8')
-        msg['From'] = from_email
-        msg['To'] = to_email
-        
+        msg = MIMEText(content, "plain", "utf-8")
+        msg["Subject"] = Header(subject, "utf-8")
+        msg["From"] = from_email
+        msg["To"] = to_email
+
         try:
             with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
                 server.login(from_email, from_password)
                 server.sendmail(from_email, [to_email], msg.as_string())
         except Exception as ssl_err:
-            if 'SSL' in str(ssl_err) or 'SSLError' in str(ssl_err):
+            if "SSL" in str(ssl_err) or "SSLError" in str(ssl_err):
                 with smtplib.SMTP(smtp_server, smtp_port) as server:
                     server.starttls()
                     server.login(from_email, from_password)
                     server.sendmail(from_email, [to_email], msg.as_string())
             else:
                 raise
-        
+
         result = {
             "status": "success",
             "message": "邮件发送成功",
             "to": to_email,
             "subject": subject,
-            "send_time": send_time
+            "send_time": send_time,
         }
         return json.dumps(result, ensure_ascii=False, indent=2)
-        
+
     except Exception as e:
         result = {
             "status": "error",
             "message": f"邮件发送失败: {str(e)}",
             "to": to_email,
             "subject": subject,
-            "send_time": send_time
+            "send_time": send_time,
         }
         return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-def get_current_time(timezone='Asia/Shanghai', format='full'):
+def get_current_time(timezone="Asia/Shanghai", format="full"):
     """获取当前时间"""
     try:
         tz = pytz.timezone(timezone)
         now = datetime.now(tz)
-        
-        if format == 'date':
-            return now.strftime('%Y年%m月%d日')
-        elif format == 'time':
-            return now.strftime('%H:%M:%S')
+
+        if format == "date":
+            return now.strftime("%Y年%m月%d日")
+        elif format == "time":
+            return now.strftime("%H:%M:%S")
         else:
-            return now.strftime('%Y年%m月%d日 %H:%M:%S %Z')
+            return now.strftime("%Y年%m月%d日 %H:%M:%S %Z")
     except Exception as e:
         return f"获取时间失败: {str(e)}"
 
@@ -260,6 +263,7 @@ def get_current_time(timezone='Asia/Shanghai', format='full'):
 def get_weather(city):
     """获取城市天气"""
     try:
+
         def weather_code_to_text(code):
             code_map = {
                 0: "晴朗",
@@ -358,17 +362,17 @@ def get_weather(city):
 
         if response.status_code == 200:
             data = response.json()
-            current = data.get('current_condition', [{}])[0]
+            current = data.get("current_condition", [{}])[0]
 
-            weather_desc = current.get('weatherDesc', [{}])[0].get('value', '未知')
-            temp_C = current.get('temp_C', 'N/A')
-            humidity = current.get('humidity', 'N/A')
-            wind_kmh = current.get('windspeedKmh', 'N/A')
-            feelslike = current.get('FeelsLikeC', 'N/A')
+            weather_desc = current.get("weatherDesc", [{}])[0].get("value", "未知")
+            temp_C = current.get("temp_C", "N/A")
+            humidity = current.get("humidity", "N/A")
+            wind_kmh = current.get("windspeedKmh", "N/A")
+            feelslike = current.get("FeelsLikeC", "N/A")
 
             return f"{city}天气:\n- 温度: {temp_C}°C (体感 {feelslike}°C)\n- 天气: {weather_desc}\n- 湿度: {humidity}%\n- 风速: {wind_kmh} km/h"
 
-        status = response.status_code if response is not None else 'N/A'
+        status = response.status_code if response is not None else "N/A"
         return f"无法获取{city}的天气信息（HTTP {status}）"
     except Exception as e:
         return f"获取天气失败: {str(e)}"
@@ -391,13 +395,13 @@ def get_stock_price_cn(ticker):
         res = requests.get(url, headers=headers, timeout=5)
         res.raise_for_status()
 
-        data = res.text.split('"')[1].split(',')
+        data = res.text.split('"')[1].split(",")
 
         if len(data) < 3:
-            return json.dumps({
-                "status": "error",
-                "message": f"未找到股票：{ticker}"
-            }, ensure_ascii=False)
+            return json.dumps(
+                {"status": "error", "message": f"未找到股票：{ticker}"},
+                ensure_ascii=False,
+            )
 
         result = {
             "name": data[0],
@@ -407,16 +411,17 @@ def get_stock_price_cn(ticker):
             "last_close": float(data[2]),
             "high": float(data[4]),
             "low": float(data[5]),
-            "change_percent": round((float(data[3]) - float(data[2])) / float(data[2]) * 100, 2),
-            "status": "success"
+            "change_percent": round(
+                (float(data[3]) - float(data[2])) / float(data[2]) * 100, 2
+            ),
+            "status": "success",
         }
         return json.dumps(result, indent=2, ensure_ascii=False)
 
     except Exception as e:
-        return json.dumps({
-            "status": "error",
-            "message": f"获取失败：{str(e)}"
-        }, ensure_ascii=False)
+        return json.dumps(
+            {"status": "error", "message": f"获取失败：{str(e)}"}, ensure_ascii=False
+        )
 
 
 def send_dingtalk(message, webhook_url=None):
@@ -427,51 +432,64 @@ def send_dingtalk(message, webhook_url=None):
     :return: JSON格式的发送结果
     """
     import os
-    
+
     if webhook_url is None:
-        webhook_url = os.environ.get('DINGTALK_WEBHOOK_URL', '')
-    
-    send_time = datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')
-    
+        webhook_url = os.environ.get("DINGTALK_WEBHOOK_URL", "")
+
+    send_time = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
+
     try:
         payload = {
             "msgtype": "text",
-            "text": {
-                "content": f"{message}\n发送时间: {send_time}"
-            }
+            "text": {"content": f"{message}\n发送时间: {send_time}"},
         }
-        
+
         response = requests.post(webhook_url, json=payload, timeout=10)
-        
+
         if response.status_code == 200:
             result_data = response.json()
-            if result_data.get('errcode') == 0:
-                return json.dumps({
-                    "status": "success",
-                    "message": "钉钉消息发送成功",
-                    "content": message,
-                    "send_time": send_time
-                }, ensure_ascii=False, indent=2)
+            if result_data.get("errcode") == 0:
+                return json.dumps(
+                    {
+                        "status": "success",
+                        "message": "钉钉消息发送成功",
+                        "content": message,
+                        "send_time": send_time,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
             else:
-                return json.dumps({
-                    "status": "error",
-                    "message": f"发送失败: {result_data.get('errmsg', '未知错误')}",
-                    "content": message,
-                    "send_time": send_time
-                }, ensure_ascii=False, indent=2)
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "message": f"发送失败: {result_data.get('errmsg', '未知错误')}",
+                        "content": message,
+                        "send_time": send_time,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
         else:
-            return json.dumps({
-                "status": "error",
-                "message": f"HTTP错误: {response.status_code}",
-                "content": message,
-                "send_time": send_time
-            }, ensure_ascii=False, indent=2)
-            
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": f"HTTP错误: {response.status_code}",
+                    "content": message,
+                    "send_time": send_time,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
     except Exception as e:
-        return json.dumps({
-            "status": "error",
-            "message": f"发送失败: {str(e)}",
-            "content": message,
-            "send_time": send_time
-        }, ensure_ascii=False, indent=2)
-        
+        return json.dumps(
+            {
+                "status": "error",
+                "message": f"发送失败: {str(e)}",
+                "content": message,
+                "send_time": send_time,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )

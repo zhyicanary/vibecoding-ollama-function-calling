@@ -1,203 +1,236 @@
-# AI 数字人对话应用
+# AI 数字人对话应用 — Supervisor + Team 多智能体系统 v3
 
-基于 Ollama 本地大模型的 AI 数字人对话应用，采用前后端分离架构。
+基于 Ollama 本地大模型的 AI 数字人对话应用，采用 LangGraph Supervisor + 6 个专业 Agent 团队协作架构，集成 Function Calling、RAG 课程问答、简历筛选、语音交互等功能。
 
 ## 技术栈
 
-- **前端**: React 18 + Vite
-- **后端**: Python FastAPI (已从Flask升级！)
-- **AI**: Ollama (本地大模型)
-- **框架**: LangChain (工具调用、会话记忆、LCEL Chain)
+- **前端**: React 18 + Vite + Web Speech API (STT/TTS)
+- **后端**: Python FastAPI + Pydantic
+- **AI**: Ollama 本地大模型
+- **框架**: LangGraph (Supervisor 路由 + Agent 循环调度) + LangChain (工具函数、RAG 检索、LCEL Chain)
+
+## 架构概览
+
+```
+                          ┌─────────────────────┐
+                          │    Supervisor LLM    │
+                          │   (Planner + Router) │
+                          └──────────┬──────────┘
+                                     │ 条件路由
+         ┌─────────────┬─────────────┼─────────────┬──────────────┬──────────────┐
+         ▼             ▼             ▼             ▼              ▼              ▼
+   ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐ ┌───────────┐ ┌──────────┐
+   │ utility  │ │  comm    │ │ finance  │ │ knowledge  │ │  resume   │ │  chat    │
+   │ qwen0.6b │ │ qwen3.5  │ │ qwen3.5  │ │ qwen3.5    │ │ qwen3.5   │ │ qwen3.5  │
+   │ 天气/时间│ │ 邮件/钉钉│ │ 股票查询 │ │ RAG 课程   │ │ 简历评估  │ │ 纯对话   │
+   └────┬─────┘ └────┬─────┘ └────┬─────┘ └──────┬─────┘ └─────┬─────┘ └────┬─────┘
+        │            │            │               │             │            │
+        └────────────┴────────────┴───────────────┴─────────────┴────────────┘
+                                     │ LOOP: agent → supervisor
+                                     ▼
+                                 FINISH
+```
+
+**Supervisor 两阶段工作流：**
+1. **Planning** — Supervisor LLM 分析用户输入，拆解为原子任务列表，分配给对应 Agent
+2. **Dispatch** — 逐个执行任务，Agent 完成后返回 Supervisor 继续调度下一任务，全部完成后合成最终回复
 
 ## 项目结构
 
 ```
 vibecoding-ollama-function-calling/
-├── frontend/          # React前端应用
+├── main.py                    # 入口点
+├── pyproject.toml             # Python 项目配置 (uv)
+├── backend/
+│   ├── app.py                 # FastAPI 应用 + 状态图构建
+│   ├── supervisor_agent.py    # Supervisor LLM (Planner + 合成)
+│   ├── state.py               # TeamState 共享状态定义
+│   ├── routing.py             # 基于规则的意图路由
+│   ├── tools.py               # 工具/服务函数 + RAG 系统
+│   ├── agents/                # 6 个专业 Agent 模块
+│   │   ├── utility_agent.py   # 天气 + 时间
+│   │   ├── comm_agent.py      # 邮件 + 钉钉
+│   │   ├── finance_agent.py   # 股票查询
+│   │   ├── knowledge_agent.py # RAG 课程问答
+│   │   ├── resume_agent.py    # 简历筛选评估
+│   │   └── chat_agent.py      # 纯对话
+│   ├── test/                  # 单元测试
+│   ├── .env                   # 环境变量
+│   ├── .env.example
+│   └── requirements.txt
+├── frontend/
 │   ├── src/
-│   │   ├── App.jsx    # 主应用组件
-│   │   ├── index.css  # 全局样式
-│   │   └── main.jsx   # 入口文件
+│   │   ├── App.jsx            # 主应用 (含 STT/TTS 语音交互)
+│   │   ├── index.css          # 赛博朋克风格样式
+│   │   └── main.jsx           # 入口
 │   ├── index.html
-│   ├── vite.config.js
+│   ├── vite.config.js         # Vite 配置 (含 API 代理)
 │   └── package.json
-├── backend/           # FastAPI后端服务
-│   ├── app.py        # API服务 (LangChain 集成)
-│   ├── tools.py      # 工具函数实现
-│   ├── requirements.txt
-│   └── .env          # 环境变量配置
-└── README.md
+└── docs/                      # 课程文档 (RAG 知识库)
 ```
 
 ## 快速启动
 
-### 1. 启动 Ollama
+### 前置条件
 
-确保已安装 Ollama 并运行：
+- Python ≥ 3.11 + [uv](https://docs.astral.sh/uv/) (推荐) 或 pip
+- Node.js ≥ 18 + pnpm (或 npm)
+- [Ollama](https://ollama.com/) 已安装并运行
+
+### 1. 启动 Ollama 并拉取模型
 
 ```bash
 ollama serve
-ollama pull llama3.2  # 首次使用需下载模型
+ollama pull qwen3.5:4b         # Supervisor / 主力模型
+ollama pull qwen3:0.6b         # utility_agent 轻量模型
+ollama pull qwen3-embedding:4b # RAG 向量嵌入模型
 ```
 
-### 2. 启动 FastAPI 后端
+### 2. 配置环境变量
 
 ```bash
-cd backend
-pip install -r requirements.txt
-python app.py
+cp backend/.env.example backend/.env
+# 编辑 backend/.env 填写必要配置
 ```
 
-**或使用启动脚本:**
-- **Windows**: `start_fastapi.bat`
-- **Linux/macOS**: `bash start_fastapi.sh`
+### 3. 启动后端
+
+```bash
+# 使用 uv (推荐)
+uv sync
+uv run python main.py
+
+# 或使用 pip
+cd backend && pip install -r requirements.txt && python app.py
+```
 
 后端运行在 `http://localhost:5000`
-- 📖 API文档: http://localhost:5000/docs
-- 📘 ReDoc: http://localhost:5000/redoc
+- Swagger 文档: http://localhost:5000/docs
+- ReDoc: http://localhost:5000/redoc
 
-### 3. 启动前端开发服务器
+### 4. 启动前端
 
 ```bash
 cd frontend
-npm run dev
+pnpm install   # 或 npm install
+pnpm dev       # 或 npm run dev
 ```
 
-前端默认运行在 `http://localhost:3000`
+前端默认运行在 `http://localhost:3000`，通过 Vite 代理连接后端。
+
+## Agent 团队
+
+| Agent | 模型 | 职责 | 工具/能力 |
+|-------|------|------|-----------|
+| **Supervisor** | qwen3.5:4b | 任务规划、路由调度、结果合成 | LLM Planning + JSON 解析 |
+| **utility_agent** | qwen3:0.6b | 天气查询、时间查询 | Open-Meteo API + wttr.in 回退 |
+| **comm_agent** | qwen3.5:4b | 邮件发送、钉钉消息 | SMTP + 钉钉 Webhook |
+| **finance_agent** | qwen3.5:4b | A 股股票查询 | 新浪财经 API |
+| **knowledge_agent** | qwen3.5:4b | 课程问答 (RAG) | ChromaDB + BM25 混合检索 + BGE Reranker |
+| **resume_agent** | qwen3.5:4b | 简历解析、技能匹配、候选人评估 | LLM 解析 + 匹配分析 |
+| **chat_agent** | qwen3.5:4b | 纯对话闲聊 | 对话 LLM |
 
 ## API 接口
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
-| `/api/chat` | POST | 发送对话请求 |
-| `/api/history/<session_id>` | GET | 获取指定会话的历史记录 |
-| `/api/history/<session_id>` | DELETE | 清除指定会话的历史记录 |
-| `/api/health` | GET | 健康检查 |
+| `/api/chat` | POST | 发送对话请求 (Supervisor 路由 → Agent 执行) |
+| `/api/history/{session_id}` | GET | 获取会话历史 |
+| `/api/history/{session_id}` | DELETE | 清除会话历史 |
+| `/api/clear` | POST | 清空当前会话 |
+| `/api/health` | GET | 健康检查 (含 Ollama 连接状态) |
+| `/api/models` | GET | 获取可用模型列表 |
 
-## 变更说明（重要）
-
-- **路由稳定性改进**：将“模型自行决定是否调用工具”的逻辑迁移到显式路由层，新增文件 [backend/routing.py](backend/routing.py#L44) 负责基于规则把高确定性意图（例如时间、天气、股票、课程问答）路由到对应工具，避免小模型漏判导致的幻觉或错误调用。
-- **天气服务改造**：`get_weather` 已从单一 `wttr.in` 替换为优先使用 Open‑Meteo 的地理编码 + 实时查询，失败时回退 `wttr.in`，实现见 [backend/tools.py](backend/tools.py#L230)。这能更稳地支持中文城市名（例如“广州”）。
-- **测试覆盖**：新增/更新路由与天气单元测试：
-  - [backend/test/test_routing.py](backend/test/test_routing.py#L1) — 覆盖多种日期/天气/股票问法的路由断言。
-  - [backend/test/test_weather_tool.py](backend/test/test_weather_tool.py#L1) — mock 验证地理编码+天气查询链路。
-- **依赖更新**：已在 [backend/requirements.txt](backend/requirements.txt#L13) 中加入 `langgraph==1.1.10`，并在运行环境中安装了 `pytz`。
-
-## 快速重启与自检
-
-在你本地将后端代码更新后，需要重启后端进程以加载新实现（重启会话内启用新的路由与天气实现）。示例命令：
-
-```powershell
-conda activate langchain
-cd backend
-python app.py
-```
-
-本地运行和测试示例：
-
-```powershell
-# 只做语法检查
-python -m py_compile backend\app.py backend\routing.py backend\tools.py backend\test\test_routing.py backend\test\test_weather_tool.py
-
-# 运行路由单测（简单脚本测试）
-python backend\test\test_routing.py
-
-# 运行天气单测（mock 测试）
-python backend\test\test_weather_tool.py
-```
-
-如果你仍然在浏览器或前端看到旧行为，请先按上面重启后端；若仍异常，我可以远程协助你重启并在日志中定位具体错误。
-
-### Chat API
+### Chat API 示例
 
 **请求**
+
 ```json
+POST /api/chat
 {
-  "message": "北京今天天气怎么样？",
-  "session_id": "user123"
+  "message": "北京今天天气怎么样？顺便帮我查一下600519的股价",
+  "session_id": "user123",
+  "model": "qwen3.5:4b"
 }
 ```
 
 **响应**
+
 ```json
 {
-  "response": {
-    "股票名称": "贵州茅台",
-    "股票代码": "600519",
-    "当前价格": "1688.00元",
-    "涨跌幅": "2.35%",
-    ...
-  }
+  "response": "北京今天多云，温度22°C，体感20°C... 贵州茅台(600519)当前价格1688.00元，涨幅2.35%...",
+  "success": true
 }
 ```
 
 ## 环境变量
 
-### 后端 (backend/.env)
-```
+### 后端 (`backend/.env`)
+
+```env
+# Ollama 连接
 OLLAMA_HOST=http://localhost:11434
-DEFAULT_MODEL=llama3.2
-CORS_ORIGINS=http://localhost:3000
+DEFAULT_MODEL=qwen3.5:4b
+
+# 服务配置
 PORT=5000
+CORS_ORIGINS=http://localhost:3000
+
+# Agent 模型 (按需覆盖默认值)
+SUPERVISOR_AGENT_MODEL=qwen3.5:4b
+CHAT_AGENT_MODEL=qwen3.5:4b
+RESUME_AGENT_MODEL=qwen3.5:4b
+
+# 邮件 (comm_agent)
 SMTP_SERVER=smtp.qq.com
 SMTP_PORT=587
 FROM_EMAIL=your_email@example.com
 SMTP_PASSWORD=your_password
+
+# 钉钉 (comm_agent)
 DINGTALK_WEBHOOK_URL=https://oapi.dingtalk.com/robot/send?access_token=xxx
+
+# RAG (knowledge_agent)
 CHROMA_DIR=backend/chroma_db
 COURSE_DOC_PATH=../docs/《智能应用系统设计》课程介绍.md
 RAG_EMBEDDING_MODEL=qwen3-embedding:4b
-RAG_LLM_MODEL=qwen3:8b
-RAG_RERANKER_MODEL=BAAI/bge-reranker-base
-RAG_PDF_PATH=backend/软件与人工智能学院本科生学业预警实施办法.pdf
+RAG_LLM_MODEL=qwen3.5:4b
 ```
 
 ## 功能特性
 
-- ✓ 实时对话交互
-- ✓ 对话历史记录（会话隔离）
-- ✓ 加载状态提示
-- ✓ 连接状态显示
-- ✓ 响应式设计
-- ✓ 赛博朋克风格UI
-- ✓ **LangChain 工具调用** (get_time, get_weather, get_stock_price, send_email, send_dingtalk)
-- ✓ **LCEL Chain** 构建
-- ✓ **会话记忆** (RunnableWithMessageHistory)
-- ✓ **JSON 输出解析** (JsonOutputParser)
+- ✅ Supervisor + Team 多智能体协作架构
+- ✅ 两阶段工作流：任务规划 → 循环调度 → 结果合成
+- ✅ 天气查询（Open-Meteo 地理编码 + wttr.in 回退，支持中文城市名）
+- ✅ 时间查询（多时区支持）
+- ✅ A 股实时股价查询
+- ✅ 邮件发送（SMTP SSL/TLS）
+- ✅ 钉钉群机器人消息推送
+- ✅ RAG 课程问答（ChromaDB + BM25 混合检索 + BGE Reranker）
+- ✅ 简历解析与候选人评估管道
+- ✅ Web Speech API 语音输入（多语言）
+- ✅ TTS 语音回答 + 口型动画
+- ✅ 多模型动态切换
+- ✅ 会话隔离与历史管理
+- ✅ 赛博朋克风格 UI
+- ✅ Swagger 自动 API 文档
 
-## 工具说明
+## 开发
 
-本应用集成了 5 个基于 `@tool` 装饰器定义的 LangChain 工具：
+```bash
+# 语法检查
+python -m py_compile backend/app.py backend/supervisor_agent.py backend/tools.py
 
-| 工具 | 功能 | 参数 |
-|------|------|------|
-| `get_time` | 获取当前时间 | `timezone`: 时区，`format`: 日期格式 |
-| `get_weather` | 查询城市天气 | `city`: 城市名称 |
-| `get_stock_price` | 查询A股股价 | `ticker`: 6位股票代码 |
-| `send_email_tool` | 发送邮件 | `to_email`, `subject`, `content` |
-| `send_dingtalk` | 发送钉钉消息 | `message`: 消息内容 |
-
-## 架构说明
-
-```
-┌─────────────┐     ┌────────────┐     ┌─────────────┐
-│   Frontend  │────▶│ FastAPI    │────▶│   Ollama    │
-│   (React)   │◀────│ (LangChain)│◀────│   (LLM)     │
-└─────────────┘     └──────┬─────┘     └─────────────┘
-                           │
-                    ┌──────▼──────┐
-                    │   Tools     │
-                    │ get_time    │
-                    │ get_weather │
-                    │ get_stock   │
-                    │ send_email  │
-                    │ send_ding   │
-                    └─────────────┘
+# 运行测试
+python backend/test/test_routing.py
+python backend/test/test_weather_tool.py
 ```
 
 ## 注意事项
 
-1. 首次启动需确保 Ollama 服务正常运行
-2. 首次对话可能需要加载模型，等待时间较长
+1. 首次启动需确保 Ollama 服务正常运行且已拉取所需模型
+2. 首次对话可能需要加载模型，等待时间较长（特别是 RAG 向量嵌入首次初始化）
 3. 前端通过 Vite 代理连接后端，无需额外配置跨域
-4. 邮件和钉钉功能需要配置相应的环境变量
+4. 邮件、钉钉功能需要配置对应的环境变量
+5. 语音功能依赖浏览器 Web Speech API（推荐 Chrome/Edge）
+6. RAG 系统首次初始化会下载 BGE Reranker 模型，耗时较长
