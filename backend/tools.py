@@ -47,7 +47,7 @@ def init_rag():
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.runnables import RunnableLambda
     from langchain_community.retrievers import BM25Retriever
-    from langchain_classic.retrievers import EnsembleRetriever
+    from langchain_community.retrievers import EnsembleRetriever
     from sentence_transformers import CrossEncoder
     
     md_path = _resolve_path(

@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import logging
@@ -32,10 +34,21 @@ logger = logging.getLogger(__name__)
 # ========================================
 # FastAPI 应用初始化
 # ========================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    logger.info("应用启动中...")
+    logger.info(f"Ollama Host: {OLLAMA_HOST}")
+    logger.info(f"Default Model: {DEFAULT_MODEL}")
+    logger.info("RAG 系统将在首次查询时懒加载...")
+    yield
+    logger.info("应用关闭中...")
+
 app = FastAPI(
     title="AI数字人对话应用",
     description="基于Ollama本地大模型的AI数字人对话应用",
-    version="2.0.0"
+    version="2.0.0",
+    lifespan=lifespan
 )
 
 # ========================================
@@ -510,7 +523,6 @@ async def get_models():
         HTTPException: 当获取模型失败时
     """
     try:
-        import requests
         response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
         if response.status_code == 200:
             data = response.json()
@@ -535,24 +547,6 @@ async def root():
         "docs": "/docs",
         "redoc": "/redoc"
     }
-
-
-# ========================================
-# 应用启动和关闭事件
-# ========================================
-@app.on_event("startup")
-async def startup_event():
-    """应用启动事件"""
-    logger.info("应用启动中...")
-    logger.info(f"Ollama Host: {OLLAMA_HOST}")
-    logger.info(f"Default Model: {DEFAULT_MODEL}")
-    logger.info("RAG 系统将在首次查询时懒加载...")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """应用关闭事件"""
-    logger.info("应用关闭中...")
 
 
 # ========================================
