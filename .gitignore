@@ -8,3 +8,4 @@ test/
 frontend/package-lock.json
 # backend/.env
 backend/chroma_db
+.idea/
